@@ -45,17 +45,25 @@ CONFIG_DEFAULT_SECURITY_APPARMOR=y
 CONFIG_LSM="landlock,lockdown,yama,integrity,apparmor,bpf"
 
 # --- T2 実機必須 (内蔵 SSD / iGPU) ---
+# 内蔵 SSD は T2 が標準 NVMe として見せるので BLK_DEV_NVME で足りる。
+# NVME_APPLE は Apple Silicon (M1系) 用ドライバで T2 では使わない。
 CONFIG_NVME_CORE=y
 CONFIG_BLK_DEV_NVME=y
-CONFIG_NVME_APPLE=m
-CONFIG_DRM_I915=m
+CONFIG_DRM_I915=y
 CONFIG_EFI_STUB=y
 CONFIG_FB_EFI=y
 
+# --- Bluetooth (defconfig には BT 自体が無い。t2 extra_config は
+#     ディストリ config 前提で CONFIG_BT を含まないため、ここで土台を入れる) ---
+CONFIG_BT=m
+CONFIG_BT_BCM=m
+CONFIG_BT_HCIUART=m
+CONFIG_SERIAL_DEV_BUS=y
+
 # --- その他ホスト用 ---
-CONFIG_9P_FS=m
-CONFIG_VIRTIO_PCI=m
-CONFIG_VIRTIO_NET=m
+CONFIG_9P_FS=y
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_NET=y
 CONFIG_VHOST_NET=m
 CONFIG_USB_XHCI_HCD=y
 CONFIG_HID_APPLE=m
