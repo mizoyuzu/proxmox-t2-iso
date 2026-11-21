@@ -1,0 +1,63 @@
+name: build-kernel
+
+# T2 パッチ済みカーネル (方式A) を .deb 化する。
+# 実行場所は GitHub Actions (Mitaさん決定 2026-11-21)。
+# 手動実行 (workflow_dispatch) が基本。KVER とパッチブランチは t2linux の
+# version ファイルに合わせて更新すること (6.18 ブランチ = KVER 6.18.56 で検証済み)。
+
+on:
+  workflow_dispatch:
+    inputs:
+      kver:
+        description: "kernel version (linux-t2-patches の version ファイルと一致させる)"
+        required: true
+        default: "6.18.56"
+      patch_branch:
+        description: "linux-t2-patches のブランチ"
+        required: true
+        default: "6.18"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev libncurses-dev \
+            dwarves pahole cpio rsync kmod dpkg-dev debhelper-compat \
+            libdw-dev zstd xz-utils
+
+      - name: Build kernel .deb packages
+        env:
+          KVER: ${{ inputs.kver }}
+          PATCH_BRANCH: ${{ inputs.patch_branch }}
+        run: |
+          chmod +x scripts/build-kernel.sh
+          ./scripts/build-kernel.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ inputs.kver }}-t2-pve
+          path: out/*.deb
+          retention-days: 30
+
+      - name: Publish release
+        if: ${{ !cancelled() }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: kernel-${{ inputs.kver }}-t2-pve
+          name: T2 kernel ${{ inputs.kver }} for Proxmox (Debian 13)
+          files: out/*.deb
+          body: |
+            mainline ${{ inputs.kver }} + linux-t2-patches (${{ inputs.patch_branch }})
+            Proxmox ホスト向け config (KVM/VFIO/LXC/bridge + T2 ドライバ)。
+            ZFS は含まない (LVM-thin / ext4 前提)。
