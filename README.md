@@ -1,51 +1,127 @@
-# proxmox-t2-iso — T2 Mac 向け Debian+Proxmox インストーラ ISO ビルド
+# proxmox-t2-iso
 
-目的: MacBookPro15,1 (MBP-ubuntu) に、T2 カスタムカーネル＋Wi-Fi/BT ファームウェア自動配置込みの
-Debian 13 (Trixie) をインストールし、その上に Proxmox VE 9 を載せるための ISO を組む。
-計画全体は ~/workspace/proxmox-mbp-plan.md を参照。インストール実行は試験後 (2026-11-26–27 以降)。
-ISO のビルド自体は MBP に変更を加えないので先行してよい (Mitaさん 2026-11-21)。
+MacBookPro15,1 (Apple T2) 向けに、Debian 13 netinst ISO をリマスターし、T2 パッチ済み mainline カーネルを導入した後、初回起動で Proxmox VE を構成するためのリポジトリです。
 
-## 実測で確定した素材 (2026-11-21)
+> **実機インストールは所有者の判断があるまで凍結中です。** 検証は GitHub Actions と VM ドライランのみで行います。実機や実ディスクでインストーラ/preseed を実行しないでください。preseed の設計・期待値は以下に記しますが、実際の挙動は [VM ドライラン手順](docs/vm-dryrun.md)で確認してください。
 
-- ファームウェア: MBP-ubuntu の /lib/firmware/brcm は 281 ファイル / 19MB。
-  全ファイルの sha256 目録を firmware/brcm-sha256sums.txt に保存済み。
-  - Wi-Fi (BCM4364): brcmfmac4364b2/b3-pcie.apple,<board>.* が非圧縮で存在 (ekans/hanauma/kahana/
-    kauai/lanai/maui/midway/nihau/sid, bali/borneo/kure/trinidad 等)
-  - Bluetooth (BCM4377b3): brcmbt4377b3-apple,formosa.bin/.ptb
-  - Apple 固有ファイルは非圧縮なので Debian 側へそのままコピーできる (汎用分は .zst だが不要)。
-  - ビルド時に MBP から tar で吸い出すか、この目録と照合して同梱する。
-- カーネルのバージョン状況 (2026-11-21 に git ls-remote で確認):
-  - pve-kernel (git.proxmox.com): trixie 向けブランチは trixie-6.14 / trixie-6.17。PVE 9 の土台は 6.14/6.17 系。
-  - linux-t2-patches (t2linux): バージョン別ブランチは 6.18 と 7.3 (他 main 等)。MBP の現行カーネルは 7.3.4-3-t2 / 6.18.5-t2。
-  - **バージョンの谷間**: pve の 6.17 と t2 パッチの 6.18/7.3 が一致しない。ここがビルド方式の分岐点。
+## ビルド方針
 
-## カーネルビルド方式の候補
+- カーネルは `config-fragment.txt`、`config-required.txt`、`scripts/build-kernel.sh`、`build-kernel.yml` などカーネル関連ファイルを変更したまとまりごとに一度だけビルドします。通常は既存 Release **`kernel-6.18.56-t2-pve`** を再利用します。
+- ISO はマイルストーン時のみビルドします。ドキュメントや小さな変更のたびにカーネル/ISO のフルビルドは行いません。
+- `build-kernel.yml` は成功した場合のみ artifact と Release を公開します。ISO workflow は Release からカーネル `.deb` を取得します。
 
-- 方式A (低リスク本命): mainline 6.18 / 7.3 ソース + linux-t2-patches (対応ブランチあり、
-  実機で起動実績のある系統) に、Proxmox カーネルの config を土台として不足分を補う。
-  ZFS は組み込みにならないが、本計画は LVM-thin / ext4 で ZFS を使わないので実害なし。
-  proxmox-default-kernel パッケージは依存関係のため入れたまま、ブートは pin で T2 カーネルに固定。
-- 方式B (理想・高コスト): pve-kernel 6.17 ソースに t2 パッチ (main / 6.18 ブランチ) を rebase。
-  ZFS 組み込みと Proxmox パッチ系列をそのまま保てるが、パッチ競合の解消作業が発生する。
-- 判定は中間段階 (50GB) のスモークテスト (VM 1台 + LXC 1台 + Jellyfin トランスコード) で行う。
+## 必要なツールと ISO の作成
 
-## ISO の構成
+リマスターに必要な主なコマンドは `xorriso`、`cpio`、`fakeroot`、`kmod`（`depmod`）、`python3`、`gzip`、`md5sum` と `dpkg-deb` です。`gh` は既存カーネル Release から `.deb` を取得する場合に使います。Debian/Ubuntu では `dpkg-deb` は `dpkg` パッケージに含まれます。
 
-1. 公式 Debian 13 netinst ISO をリマスター (xorriso で展開・再構築、EFI 保持)。
-2. ブート用カーネル / initrd をカスタムカーネルに差し替え。initrd に apple-bce, NVMe (ans),
-   SPI キーボード/トラックパッド等のモジュールと Wi-Fi ファームウェアを含める。
-3. preseed: partman は最大の連続空き領域を自動選択し、VG pve の LVM レシピで入れる。
-   既存の macOS / Data / Ubuntu には触らない。→ preseed.cfg (下書き)
-4. 追加パッケージ置き場: カスタムカーネル .deb、t2fanrd、tiny-dfr、オーディオ設定、
-   modules-load / modprobe quirk、ファームウェア配置 (late_command で /target/lib/firmware/brcm へ)。
-5. Proxmox 化は初回起動スクリプト (first-boot) に分離: PVE リポジトリ追加、proxmox-ve 導入、
-   公式カーネルのブート pin 外し、vmbr0 作成。
+Debian 13 amd64 netinst ISO と `linux-image-*.deb` を用意し、次のように実行します。
 
-## 決定済み
+```sh
+DEBIAN_ISO=/path/debian-13.x-amd64-netinst.iso \
+KERNEL_DEB_DIR=/path/debs \
+  ./scripts/remaster-iso.sh out.iso
+```
 
-- カーネルビルドの実行場所: **GitHub Actions** (Mitaさん決定 2026-11-21)。
-  パイプラインは .github/workflows/build-kernel.yml + scripts/build-kernel.sh。
-- パッチ適用の検証済み (2026-11-21): linux-6.18.56 に対し 6.18 ブランチの全 24 パッチが
-  無競合で適用できた (patch-apply-verification-6.18.56.txt)。対象は方式A で確定。
-- 残作業: GitHub へ push するには Mita さんの GitHub 認証が要る (gh は未ログイン)。
-  リポジトリを作成して push すれば、Actions の手動実行で初回ビルドが回る。
+Release からカーネルパッケージを取得する例:
+
+```sh
+mkdir -p debs
+gh release download kernel-6.18.56-t2-pve --pattern '*.deb' --dir debs
+```
+
+オプションの環境変数:
+
+- `FIRMWARE_DIR=/path/brcm`: ローカルの私的ビルドに限り、Broadcom ファームウェアを ISO の `/t2/firmware/brcm/` に追加します。
+- `SSH_AUTHORIZED_KEYS_FILE=/path/authorized_keys`: 任意の SSH 公開鍵ファイルを ISO に同梱し、インストール先の `/root/.ssh/authorized_keys` に配置します。
+
+## ファームウェア方針
+
+Apple ファームウェアのバイナリは、再配布条件が確認できていないため、公開リポジトリにも公開 ISO にも含めません。`firmware/` に置くのは SHA-256 目録のみです。Wi-Fi ファームウェアをインストーラ initrd に含めることもありません。
+
+GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、ファームウェアなし ISO を作ります。workflow はその旨を `NOTE` と Step Summary の両方に表示します。私的なローカルビルドで `FIRMWARE_DIR` を指定した場合は `/t2/firmware/brcm/` に同梱し、インストーラの `late_command` が `/target/lib/firmware/brcm/` に配置する設計です。ローカル生成物を公開・配布しないでください。
+
+## インストール選択とパーティション設計
+
+### 起動メニュー
+
+- GRUB は通常の **Install** をデフォルトにし、タイムアウトは 30 秒です。自動インストールはデフォルトでは起動しません。
+- 自動インストールは GRUB の `--hotkey=a` エントリを明示的に選択した場合のみ実行します。起動引数は `auto=true priority=critical preseed/file=/preseed.cfg` です。
+- BIOS/isolinux 側のエントリ名は `t2auto` です。
+
+### preseed のディスク設計
+
+以下はこの作業で共有されている確定設計です。preseed の最終内容と実際の partman 動作は VM ドライランで照合してください。
+
+- インストール対象は `/dev/nvme0n1`、partman の選択方法は `biggest_free` です。`partman-auto/method` は設定しません。
+- 新しいパーティションを空き領域に作ります。既存 ESP を再利用せず、既存の LVM/MD を削除しません。
+- レシピは新規 ESP 512 MiB、`/boot` 1–1.5 GiB、swap 4 GiB、root 20–32 GiB ext4、残り全部を `method{ lvm }` の予約パーティションとします。
+- partman はこのレシピだけでは VG を作りません。`late_command` が udev の `ID_PART_ENTRY_TYPE` が `E6D6D379-F507-44C2-A23C-238F2A3DF928`（Linux LVM）の予約パーティションを特定し、`pvcreate` / `vgcreate pve` を実行します。
+- この方式では root と swap は通常パーティションであり LV ではありません。thin pool は初回起動時に VG の空き 100% から `pve/data` として作ります。
+
+## late_command の責務
+
+インストーラの `late_command` は、設計上、次の処理を行います。
+
+1. 予約パーティションから LVM PV と VG `pve` を作成。
+2. `first-boot-proxmox.sh` と `first-boot-proxmox.service` をインストール先へ配置。
+3. ISO 内の T2 カーネル `.deb` を in-target でインストールし、`/boot/vmlinuz-*` と initrd の存在を確認。
+4. `ssh.service` と `first-boot-proxmox.service` を enable。
+5. `/etc/ssh/sshd_config.d/10-t2.conf` に `PermitRootLogin yes` と `PasswordAuthentication yes` を設定。任意の鍵を指定した場合は `/root/.ssh/authorized_keys` に配置。
+6. ローカル ISO に含まれる場合のみ、ファームウェアを `/target/lib/firmware/brcm/` へ配置。
+
+処理失敗を握りつぶさないよう `set -e` で停止させる設計です。パスワード、秘密鍵、Wi-Fi 認証情報を preseed やスクリプトへ平文で書きません。
+
+## SSH とネットワーク
+
+- SSH ログインは、インストーラの対話画面で設定する root パスワードを基本経路とします。作成するユーザーは root のみです。SSH はインストール直後から有効にする設計です。
+- 鍵ログインを選ぶ場合に限り `SSH_AUTHORIZED_KEYS_FILE` を指定します。秘密鍵は ISO に入れず、パスワードも文書・preseed に記載しません。
+- インストーラのネットワークは USB/Thunderbolt 有線 Ethernet アダプタを前提とします。Wi-Fi SSID/認証情報を preseed しません。
+- 初回起動スクリプトは有線 NIC を選び、インストーラが設定した NIC の DHCP stanza を退避したうえで `/etc/network/interfaces.d/vmbr0` に `vmbr0`（DHCP、`bridge-ports <nic>`）を作成します。有線 NIC が見つからない場合は bridge 設定をスキップするため、初回起動時に有線接続が必要です。
+- Proxmox Web UI: `https://<IP>:8006/`。ホスト名は `pve-mbp`、FQDN は `pve-mbp.local` です。名前解決は LAN の環境にも依存します。
+
+## 初回起動の Proxmox 構成
+
+`first-boot-proxmox.service` がネットワーク起動後に `first-boot-proxmox.sh` を一度実行します。成功時に `/var/lib/first-boot-proxmox.done` marker を作り、失敗時は成功扱いにしません。初回処理にはネットワーク接続が必要です。
+
+スクリプトの処理内容:
+
+- Proxmox VE の `pve-no-subscription` リポジトリと署名鍵を設定し、`proxmox-ve`、`postfix`、`open-iscsi`、`chrony`、`ifupdown2` を導入。
+- VG `pve` の存在を必須確認し、その空き extents の 100% から thin pool `pve/data` を作成して `local-lvm` として登録。
+- インストール済み T2 カーネルを GRUB の **Parent>Title** 形式でデフォルト固定し、`GRUB_TIMEOUT=10` に設定。削除対象は Debian の `linux-image-amd64` メタパッケージのみ。
+- 有線 NIC を使う `vmbr0` 設定を作成し、Proxmox 関連サービスと SSH を enable。
+
+初回起動スクリプトは自動で再起動しません。処理ログは `/var/log/first-boot-proxmox.log` に記録されます。
+
+## カーネル
+
+- mainline Linux **6.18.56** に `linux-t2-patches` の **6.18** ブランチを適用します。パッチ 24 件の適用は `patch-apply-verification-6.18.56.txt` に記録されています。
+- `defconfig` と T2 側 `extra_config` に `config-fragment.txt` をマージし、`config-required.txt` の各設定をビルド前にアサートします。
+- `FB_EFI` と framebuffer/console の依存チェーン、PVE 用 nftables/ipset/bridge/cgroup 機能を設定・検査します。
+- T2 Mac の内蔵 SSD は標準 NVMe として扱います。`BLK_DEV_NVME` を使用し、Apple Silicon 向け `NVME_APPLE` は使いません。
+- このカーネルは Proxmox の PVE カーネルそのものではなく、mainline + T2 patches に PVE ホスト用設定を加えたものです。ZFS は対象外で、ストレージ設計は ext4 + LVM-thin です。
+
+## リポジトリ構成
+
+```text
+.
+├── .github/workflows/  # build-kernel.yml / build-iso.yml
+├── docs/               # VM ドライラン手順
+├── firmware/           # ファームウェアの SHA-256 目録のみ
+├── scripts/            # カーネル、ISO、初回起動の処理
+├── config-fragment.txt # カーネル設定 fragment
+├── config-required.txt # 必須カーネル設定のアサート一覧
+└── preseed.cfg         # Debian Installer の自動インストール設定
+```
+
+## 既知の制約とリスク
+
+- root と swap は LVM LV ではなく通常パーティションです。
+- 既存 ESP は再利用・変更せず、別の ESP を作る設計です。実ディスク上での共存動作は未検証です。
+- MacBookPro15,1 の T2 実機での EFI 起動、画面表示、各デバイス動作は未検証です。カーネル設定のアサートだけで実機動作を保証するものではありません。
+- 実機インストールおよび実機検証は未実施です。まず VM で partman の配置、既存 p1/p2 の保持、インストール後のファイルと LVM を確認してください。
+- 初回の Proxmox パッケージ導入にはネットワーク接続が必要です。有線 NIC が認識されない場合、`vmbr0` は作成されません。
+- 公開 CI ISO には Apple ファームウェアがありません。無線デバイスの動作を保証しません。
+
+## VM での確認
+
+preseed の VM ドライラン、既存パーティションの保持確認、オフライン検査の具体的な手順は [docs/vm-dryrun.md](docs/vm-dryrun.md) を参照してください。
