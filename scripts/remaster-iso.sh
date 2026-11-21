@@ -55,9 +55,12 @@ mkdir -p "lib/modules/$KVER_FULL"
 cp -a "$KEX/lib/modules/$KVER_FULL/." "lib/modules/$KVER_FULL/"
 depmod -b . "$KVER_FULL"
 # 早期ロードさせるモジュール (キーボード/トラックパッド/SSD/Wi-Fi)
+# 実際には udev の modalias で大半が自動ロードされる。強制ロードは
+# preseed.cfg の preseed/early_command 側でも指定して二重化してある。
+mkdir -p etc/modprobe.d
 for m in t2bce_core t2bce_dma t2bce_vhci nvme_apple brcmfmac hid_appletb_kbd \
-         drm_appletbdr; do
-  echo "$m" >> etc/modprobe.d/t2-early.conf 2>/dev/null || true
+         appletbdrm; do
+  echo "$m" >> etc/modprobe.d/t2-early.conf
 done
 # ファームウェア注入 (Wi-Fi BCM4364 / BT BCM4377 他、実機の実績セット)
 mkdir -p lib/firmware/brcm
@@ -68,10 +71,33 @@ cp "$ROOT/preseed.cfg" ./preseed.cfg
 find . | cpio -o -H newc --quiet | gzip -9 > "$TREE/install.amd/initrd.gz"
 cd - >/dev/null
 
-# --- 4. GRUB: 自動インストールをデフォルト化 ---
-# grub.cfg に auto=true priority=critical file=/cdrom/preseed.cfg 相当を追記。
-# 実装は ISO の grub.cfg 形式に合わせて試験後に確定 (TODO)。
-echo "TODO: patch $TREE/boot/grub/grub.cfg (auto install entry)"
+# --- 4. GRUB / isolinux: 自動インストールを先頭+デフォルトにする ---
+# 実物確認済み (Debian 13.7.0 netinst): /boot/grub/grub.cfg の各 menuentry は
+# /install.amd/vmlinuz + /install.amd/initrd.gz (gtk は gtk/initrd.gz) を使う。
+# EFI 側は /efi/debian/grub.cfg が /.disk/id/<uuid> を探して本 grub.cfg を読む
+# ため、インプレース再構築 (手順6) で .disk/id を壊さないことが重要。
+python3 - "$TREE/boot/grub/grub.cfg" <<'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+entry = """set default=0
+set timeout=5
+menuentry --hotkey=a 'Automated install (T2 Proxmox)' {
+    set background_color=black
+    linux    /install.amd/vmlinuz auto=true priority=critical vga=788 --- quiet
+    initrd   /install.amd/initrd.gz
+}
+"""
+open(path, "w").write(entry + src)
+print("grub.cfg: T2 automated entry prepended")
+PYEOF
+# BIOS (isolinux) 側にも自動インストール項目を追加 (MBP は UEFI のみだが保険)
+cat >> "$TREE/isolinux/txt.cfg" <<'EOF'
+label t2auto
+	menu label ^Automated install (T2 Proxmox)
+	kernel /install.amd/vmlinuz
+	append auto=true priority=critical vga=788 initrd=/install.amd/initrd.gz --- quiet
+EOF
 
 # --- 5. /t2 ペイロード ---
 mkdir -p "$TREE/t2/debs" "$TREE/t2/scripts"
@@ -79,11 +105,17 @@ cp "$KERNEL_DEB_DIR"/*.deb "$TREE/t2/debs/"
 cp "$ROOT/scripts/first-boot-proxmox.sh" "$TREE/t2/scripts/"
 chmod +x "$TREE/t2/scripts/first-boot-proxmox.sh"
 
-# --- 6. md5sum 再生成 + ISO 再構築 (El Torito は元 ISO から引き継ぐ) ---
+# --- 6. md5sum 再生成 + ISO 再構築 (インプレース方式) ---
+# 元 ISO を土台にファイルだけ差し替える。El Torito (isolinux + EFI の
+# /boot/grub/efi.img) と /.disk/id/<uuid> は元 ISO のものを保持するのが肝。
+# 一から mkisofs すると EFI スタブが探す .disk/id の UUID がずれてブートしない。
 (cd "$TREE" && find . -type f -print0 | sort -z | xargs -0 md5sum > md5sum.txt)
 xorriso -indev "$DEBIAN_ISO" -outdev "$OUT_ISO" \
   -boot_image isolinux keep -boot_image grub keep \
-  -map "$TREE" / -commit -eject 2>/dev/null \
-  || echo "TODO: xorriso の再構築パラメータは元 ISO の eltorito 報告に合わせて確定すること"
+  -map "$TREE" / -commit
 
-echo "done: $OUT_ISO (未検証 — QEMU ブート確認が前提)"
+# --- 検証: ブートイメージが両方残っていること ---
+echo "=== El Torito report (BIOS + EFI の2つがあること) ==="
+xorriso -indev "$OUT_ISO" -report_el_torito plain 2>/dev/null | grep -E "El Torito boot img|Boot image" || true
+
+echo "done: $OUT_ISO (ブート実地確認はカーネル .deb が揃ってから QEMU / 実機で)"
