@@ -1,4 +1,6 @@
 build/
 out/
 build-work/
+iso-work/
 *.deb
+*.iso
