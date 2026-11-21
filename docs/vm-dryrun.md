@@ -2,7 +2,7 @@
 
 この手順は Debian Installer のパーティション配置、既存パーティションの保持、インストール先のファイル、LVM の状態をオフラインで確認するためのものです。**実機・実ディスクでは実行しないでください。** すべての書き込み先は使い捨ての VM ディスクイメージに限定します。
 
-2026-11-21 に、使い捨て 64 GiB GPT ディスクと UEFI QEMU で final preseed の F テストを実施しました。p1/p2 の保持、p3–p7 の作成、partman の追加ダイアログがないこと、`late_command` による p7 の `pvcreate` / `vgcreate pve`、空き extents 7937 × 4 MiB（31.00 GiB）を確認済みです。最終リマスター ISO の CI ビルドと VM 起動確認の結果は、実施後にこの文書へ追記します。
+2026-11-21 に、使い捨て 64 GiB GPT ディスクと UEFI QEMU で final preseed の F テストを実施しました。p1/p2 の保持、p3–p7 の作成、partman の追加ダイアログがないこと、`late_command` による p7 の `pvcreate` / `vgcreate pve`、空き extents 7937 × 4 MiB（31.00 GiB）を確認済みです。最終リマスター ISO の CI ビルド、VM インストーラ完了、およびオフライン検査の結果は、この文書末尾の [CI8 最終検証結果](#ci8-最終検証結果-2026-11-21)に記録しています。
 
 ## 1. ホスト要件
 
@@ -92,7 +92,7 @@ initrd /install.amd/initrd-t2auto
 boot
 ```
 
-シリアルコンソールでは Debian Installer が言語候補を display level 0 に絞るため、通常の候補は C/英語だけです。preseed は `localechooser/languagelist=ja` を質問に直接設定するので、`debian-installer/language=ja` だけでは不足するシリアルを含め、どのコンソールでも言語質問をスキップします。最終 CI ビルドと VM 起動の証跡は実施後にこの文書へ追記します。
+シリアルコンソールでは Debian Installer が言語候補を display level 0 に絞るため、通常の候補は C/英語だけです。preseed は `localechooser/languagelist=ja` を質問に直接設定するので、`debian-installer/language=ja` だけでは不足するシリアルを含め、どのコンソールでも言語質問をスキップします。CI8 の最終ビルドと VM ドライラン結果は、この文書末尾の [CI8 最終検証結果](#ci8-最終検証結果-2026-11-21)を参照してください。
 
 インストーラでは root パスワードを対話入力します。パスワードは記録・共有せず、preseed に追加しません。自動エントリでインストールを完了した後は、インストール済み OS を初回起動する前に VM を poweroff してください。QEMU モニタで `system_powerdown` を実行するか、インストーラの電源オフ操作を使います。first-boot のネットワーク処理を走らせず、インストール直後の状態をオフラインで確認します。
 
@@ -189,3 +189,33 @@ sudo losetup -d "$LOOP"
 ## 5. 片付け
 
 loop device が切り離され、QEMU が停止していることを確認します。テストディスクと OVMF vars は使い捨ての `/tmp` ファイルです。実ディスクやホストの LVM を操作・削除しないでください。
+
+## CI8 最終検証結果 (2026-11-21)
+
+以下は最終 CI ISO を使った使い捨て VM ドライランの記録です。証跡ファイルはユーザー指定の `proxmox-t2-iso-vmtest` evidence bundle にあります。検証対象は ISO の preflight、Debian Installer の完了、インストール済みディスクのオフライン状態までです。
+
+### CI artifact と ISO preflight — PASS
+
+- GitHub Actions run **44922625539**、build commit **16798c5**。ISO SHA-256 は `f8655a1a7a1372bca972038fc1872eb3240f86105a98bea64b498aa1ec4bde2e`。artifact ZIP と抽出 ISO の両方でチェックサム PASS。
+- Preflight PASS: ISO root と main initrd に `/preseed.cfg` はなく、main initrd の `/dev/console` と `/dev/null` は character device。`preseed-initrd.cpio` は `preseed.cfg` のみで、日本語用 `localechooser/languagelist` / `debian-installer/language` 行を含み、root/user password は preseed していません。
+- `initrd-t2auto` は `preseed-initrd.cpio` に main initrd を連結したもの。combined initrd を使うのは T2 自動インストール項目だけで、stock Install / Graphical install / Advanced options は preseed-free であることを確認。
+
+### VM installer — PASS
+
+- 新規の使い捨て **64 GiB NVMe** ディスクを UEFI/OVMF と serial console を使う QEMU VM に接続。GRUB CLI で `auto=true priority=critical preseed/file=/preseed.cfg console=ttyS0,115200n8 --- quiet` と `initrd /install.amd/initrd-t2auto` を指定して起動しました（完全な QEMU invocation は `run-qemu-ci8.sh`）。
+- 言語、location、locale、keyboard、timezone、anna の質問は表示されず、対話入力は root password とその確認入力のみでした。インストーラは完了して reboot を要求。
+- QEMU の `-no-reboot` により要求時に VM が停止したため、インストール済み OS は起動していません。first boot も行っていません。
+- 操作上の異常: 最初の GRUB キー入力は中断。後の余分な tab/input で一時的にインストーラのメインメニューへ戻りましたが、インストーラを再開して完了しました。これは操作上の中断で、コード障害は観測されませんでした。
+
+### インストール済みディスクの読み取り専用オフライン検査 — PASS
+
+- p1/p2 の `DRYRUN-P1` / `DRYRUN-P2` marker と PARTUUID（それぞれ `D3BF572A-F2E3-4C98-8314-BF267884ABF5` / `80C42A46-7629-4401-87B3-D1A398A09C33`）を保持。
+- Partition layout: p3 vfat、p4 ext4、p5 swap、p6 ext4、p7 LVM2_member。VG `pve`: 1 PV、0 LV、VFree **33,290,190,848 bytes**（first-boot 前の状態）。
+- `6.18.56-t2-pve` kernel と initrd が存在し、`first-boot-proxmox.service` は enable 済み。SSH 設定は `PermitRootLogin yes` / `PasswordAuthentication yes`。locale `ja_JP.UTF-8`、keyboard `jp`、timezone `Asia/Tokyo`、hostname `pve-mbp` を確認し、`/tmp/t2-debs` は存在しません。
+- インストール済み `/etc/default/grub` は `GRUB_DEFAULT=0` で、生成済み `grub.cfg` の先頭 entry は T2 kernel を指定。**first-boot script 内の GRUB pin は実行も検証もしていません**（installed OS を起動していないため）。
+
+### 未検証事項とリスク
+
+実機 T2 hardware は未検証です。公開 ISO に Apple firmware は含みません。インストール済み OS の boot、first-boot PVE provisioning、live SSH、`vmbr0`、first-boot による GRUB pin、および first boot は未検証です。Proxmox Web UI の動作も確認していません。Debian の current point release が変わった場合は ISO を再検証してください。
+
+証跡一覧: `CI8-FINAL-REPORT.txt`、`CI8-PREFLIGHT.txt`、`CI8-CHECKSUMS.txt`、`CI8-SERIAL-CLEAN.txt`、`ci8-offline-checks.txt`、`ci8-late-command-evidence.txt`、`ci8-installed-grub-defaults.txt`、`ci8-installed-grub.cfg`、`ci8-installed-first-boot.sh`、`run-qemu-ci8.sh`。

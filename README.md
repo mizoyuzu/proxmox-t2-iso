@@ -50,7 +50,7 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 
 ### preseed のディスク設計
 
-以下は確定設計です。最終 preseed の F テストを使い捨て VM ディスクで実施した記録は [VM ドライラン](docs/vm-dryrun.md)を参照してください。最終リマスター ISO の CI ビルドと VM 起動確認は別途実施後に記録します。
+以下は確定設計です。最終リマスター ISO の CI ビルドとインストーラ完了までの VM ドライランは実施済みです。結果と未検証事項は [CI8 最終検証](docs/vm-dryrun.md#ci8-最終検証結果-2026-11-21)を参照してください。
 
 - インストール対象は `/dev/nvme0n1`、partman の選択方法は `biggest_free` です。`partman-auto/method` は設定しません。
 - 新しいパーティションを空き領域に作ります。既存 ESP を再利用せず、既存の LVM/MD を削除しません。
@@ -118,10 +118,21 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 
 - root と swap は LVM LV ではなく通常パーティションです。
 - 既存 ESP は再利用・変更せず、別の ESP を作る設計です。実ディスク上での共存動作は未検証です。
-- MacBookPro15,1 の T2 実機での EFI 起動、画面表示、各デバイス動作は未検証です。カーネル設定のアサートだけで実機動作を保証するものではありません。
-- 実機インストールおよび実機検証は未実施です。まず VM で partman の配置、既存 p1/p2 の保持、インストール後のファイルと LVM を確認してください。
+- MacBookPro15,1 の T2 実機での EFI 起動、画面表示、各デバイス動作は未検証です。カーネル設定のアサートや VM 成功だけで実機動作を保証するものではありません。
+- CI8 では使い捨て VM 上のインストール完了とオフライン状態を確認しましたが、インストール済み OS は起動していません。実機インストール、first-boot の PVE 構成、ライブ SSH、`vmbr0`、first-boot による GRUB pin、および first boot は未検証です。
 - 初回の Proxmox パッケージ導入にはネットワーク接続が必要です。有線 NIC が認識されない場合、`vmbr0` は作成されません。
 - 公開 CI ISO には Apple ファームウェアがありません。無線デバイスの動作を保証しません。
+- Debian の current point release が変わると、再ビルド ISO の内容やインストーラ挙動も変わる可能性があります。
+
+## CI8 最終検証 (2026-11-21)
+
+- GitHub Actions run **44922625539**（commit **16798c5**）で ISO をビルド。ISO SHA-256: `f8655a1a7a1372bca972038fc1872eb3240f86105a98bea64b498aa1ec4bde2e`。artifact ZIP と抽出 ISO のチェックサムは PASS。
+- ISO preflight は PASS。main initrd に preseed はなく、`preseed-initrd.cpio` と `initrd-t2auto` を確認。combined initrd を使うのは T2 自動インストール項目だけで、stock 項目は preseed-free。日本語の locale/language 行があり、root/user パスワードは preseed されていません。
+- 新規 64 GiB NVMe の UEFI/OVMF・シリアルコンソール VM でインストーラ完了まで PASS。GRUB CLI から `initrd-t2auto` で起動し、言語・地域・locale・keyboard・timezone・anna の各質問はなく、対話入力は root パスワード（確認入力を含む）のみ。QEMU は `-no-reboot` で停止し、インストール済み OS は起動していません。
+- オフライン検査では p1/p2 のマーカーと PARTUUID を保持し、p3 vfat、p4 ext4、p5 swap、p6 ext4、p7 LVM2_member を確認。VG `pve` は 1 PV / 0 LV、空き 33,290,190,848 bytes。T2 kernel/initrd、first-boot service、SSH 設定、locale/keyboard/timezone、hostname、および `/tmp/t2-debs` 不在も確認。`GRUB_DEFAULT=0` と T2 kernel が先頭の生成済み GRUB 項目を確認しましたが、first-boot script による GRUB pin は実行・検証していません。
+- 操作者による最初の GRUB キー入力は中断され、後の余分な tab/input で一時インストーラーメニューへ戻りましたが、インストーラを再開して完了しました。コード障害は観測されていません。
+
+検証の詳細と境界（PVE first-boot 構成、live SSH、`vmbr0`、GRUB pin、first boot、および実機動作は未検証）は [docs/vm-dryrun.md](docs/vm-dryrun.md#ci8-最終検証結果-2026-11-21) を参照してください。
 
 ## VM での確認
 
