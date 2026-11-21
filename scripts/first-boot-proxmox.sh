@@ -252,10 +252,13 @@ else
 fi
 
 log 'Pinning GRUB to the installed T2 PVE kernel.'
-if [[ ! -r "$GRUB_CFG" ]]; then
-  die "${GRUB_CFG} is missing; cannot select the T2 kernel."
+if [[ ! -r "$GRUB_CFG" ]] || ! T2_DEFAULT=$(grub_t2_default "$GRUB_CFG"); then
+  log "${GRUB_CFG} is unreadable or has no T2 entry; regenerating GRUB configuration once."
+  if ! update-grub; then
+    die "update-grub failed while regenerating ${GRUB_CFG}."
+  fi
 fi
-if ! T2_DEFAULT=$(grub_t2_default "$GRUB_CFG"); then
+if [[ ! -r "$GRUB_CFG" ]] || ! T2_DEFAULT=$(grub_t2_default "$GRUB_CFG"); then
   die "no GRUB menuentry with a linux line using a t2-pve kernel was found in ${GRUB_CFG}."
 fi
 # GRUB menuentry IDs inside a submenu are scoped to that submenu; a bare child
