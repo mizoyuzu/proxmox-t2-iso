@@ -65,5 +65,11 @@ make -j"$(nproc)" bindeb-pkg \
 
 mv ../*.deb "$OUT/" 2>/dev/null || mv ./*.deb "$OUT/" 2>/dev/null || \
   find .. -maxdepth 2 -name '*.deb' -exec mv {} "$OUT/" \;
+shopt -s nullglob
+image_packages=("$OUT"/linux-image-*.deb)
+if [ "${#image_packages[@]}" -eq 0 ]; then
+  echo "ERROR: no linux-image-*.deb package was produced" >&2
+  exit 1
+fi
 echo "=== artifacts ==="
 ls -lh "$OUT"
