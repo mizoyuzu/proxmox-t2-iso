@@ -123,9 +123,6 @@ depmod -b "$initrd_dir" "$kver"
 # brcm firmware is post-install payload only, never part of the installer initrd.
 rm -rf -- lib/firmware/brcm
 
-# Early-load T2 devices; NVME_APPLE is Apple-Silicon-only.
-mkdir -p etc/modprobe.d
-printf "%s\\n" t2bce_core t2bce_dma t2bce_vhci hid_appletb_kbd appletbdrm brcmfmac > etc/modprobe.d/t2-early.conf
 cp -- "$preseed" ./preseed.cfg
 
 find . -print0 | cpio --null -o -H newc --quiet | gzip -9 > "$initrd_gz"
