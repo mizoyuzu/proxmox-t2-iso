@@ -41,8 +41,11 @@ ISO のビルド自体は MBP に変更を加えないので先行してよい (
 5. Proxmox 化は初回起動スクリプト (first-boot) に分離: PVE リポジトリ追加、proxmox-ve 導入、
    公式カーネルのブート pin 外し、vmbr0 作成。
 
-## 未決定
+## 決定済み
 
-- カーネルビルドの実行場所: GitHub Actions (更新パイプラインと同一基盤にできる) /
-  sakuraVPS-1 (7.8GB RAM、ディスク 44% 使用) / MBP 自身 (試験後、電源が安定した今なら可だが負荷は高い)。
-  ※ Muse の VM は 1.5 コア共有 / 6GiB のためカーネルビルドの反復には不向き。
+- カーネルビルドの実行場所: **GitHub Actions** (Mitaさん決定 2026-11-21)。
+  パイプラインは .github/workflows/build-kernel.yml + scripts/build-kernel.sh。
+- パッチ適用の検証済み (2026-11-21): linux-6.18.56 に対し 6.18 ブランチの全 24 パッチが
+  無競合で適用できた (patch-apply-verification-6.18.56.txt)。対象は方式A で確定。
+- 残作業: GitHub へ push するには Mita さんの GitHub 認証が要る (gh は未ログイン)。
+  リポジトリを作成して push すれば、Actions の手動実行で初回ビルドが回る。
