@@ -14,6 +14,7 @@ ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 WORK="$(pwd)/iso-work"
 TREE="$WORK/tree"
 INITRD_DIR="$WORK/initrd"
+INITRD_VERIFY_DIR="$WORK/initrd-verify"
 
 if ! command -v fakeroot >/dev/null 2>&1; then
   echo "ERROR: fakeroot is required to extract and repack the installer initrd as a non-root user" >&2
@@ -103,26 +104,44 @@ cp -- "$KVMLINUZ" "$TREE/install.amd/vmlinuz"
 
 # --- 3. initrd 再構築 ---
 # fakeroot supplies the root/device-node metadata cpio needs without requiring
-# privileges from the Actions runner. Keep the complete custom module tree.
-fakeroot -- sh -c 'set -e; cd "$1"; gzip -dc "$2" | cpio -idm --quiet' \
-  sh "$INITRD_DIR" "$TREE/install.amd/initrd.gz"
-mkdir -p "$INITRD_DIR/lib/modules/$KVER_FULL"
-cp -a "$MODULES_DIR/." "$INITRD_DIR/lib/modules/$KVER_FULL/"
-depmod -b "$INITRD_DIR" "$KVER_FULL"
+# privileges from the Actions runner. Extraction and repacking share one
+# fakeroot metadata session so cpio's fake device nodes retain their types.
+fakeroot -- bash -c '
+set -euo pipefail
+initrd_dir="$1"
+initrd_gz="$2"
+modules_dir="$3"
+kver="$4"
+preseed="$5"
+
+cd "$initrd_dir"
+gzip -dc "$initrd_gz" | cpio -idm --quiet
+mkdir -p "lib/modules/$kver"
+cp -a "$modules_dir/." "lib/modules/$kver/"
+depmod -b "$initrd_dir" "$kver"
 
 # brcm firmware is post-install payload only, never part of the installer initrd.
-rm -rf -- "$INITRD_DIR/lib/firmware/brcm"
+rm -rf -- lib/firmware/brcm
 
-# Early-load devices used on T2 hardware. NVME_APPLE is Apple-Silicon-only;
-# the T2 SSD uses the standard NVMe driver.
-mkdir -p "$INITRD_DIR/etc/modprobe.d"
-{
-  printf '%s\n' t2bce_core t2bce_dma t2bce_vhci hid_appletb_kbd appletbdrm brcmfmac
-} > "$INITRD_DIR/etc/modprobe.d/t2-early.conf"
-cp -- "$ROOT/preseed.cfg" "$INITRD_DIR/preseed.cfg"
+# Early-load T2 devices; NVME_APPLE is Apple-Silicon-only.
+mkdir -p etc/modprobe.d
+printf "%s\\n" t2bce_core t2bce_dma t2bce_vhci hid_appletb_kbd appletbdrm brcmfmac > etc/modprobe.d/t2-early.conf
+cp -- "$preseed" ./preseed.cfg
 
-fakeroot -- sh -c 'set -e; cd "$1"; find . -print0 | cpio --null -o -H newc --quiet | gzip -9 > "$2"' \
-  sh "$INITRD_DIR" "$TREE/install.amd/initrd.gz"
+find . -print0 | cpio --null -o -H newc --quiet | gzip -9 > "$initrd_gz"
+' bash "$INITRD_DIR" "$TREE/install.amd/initrd.gz" "$MODULES_DIR" "$KVER_FULL" "$ROOT/preseed.cfg"
+
+# Re-extract the packed archive and check device-node types while the same
+# fakeroot metadata session is alive. A separate fakeroot invocation would
+# not retain the fake device metadata created by cpio.
+mkdir -p "$INITRD_VERIFY_DIR"
+if ! fakeroot -- bash -c 'set -euo pipefail; cd "$1"; gzip -dc "$2" | cpio -idm --quiet; test -c "$1/dev/console"; test -c "$1/dev/null"' \
+  bash "$INITRD_VERIFY_DIR" "$TREE/install.amd/initrd.gz"; then
+  rm -rf -- "$INITRD_VERIFY_DIR"
+  echo "ERROR: rebuilt initrd failed validation: /dev/console and /dev/null must be character devices" >&2
+  exit 1
+fi
+rm -rf -- "$INITRD_VERIFY_DIR"
 
 # --- 4. GRUB / isolinux: preserve normal install as the safe default ---
 # Debian 13.7.0 amd64's top-level entries start with Graphical install, Install.
