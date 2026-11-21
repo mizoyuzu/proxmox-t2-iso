@@ -112,10 +112,10 @@ initrd_dir="$1"
 initrd_gz="$2"
 modules_dir="$3"
 kver="$4"
-preseed="$5"
 
 cd "$initrd_dir"
 gzip -dc "$initrd_gz" | cpio -idm --quiet
+rm -f -- preseed.cfg
 mkdir -p "lib/modules/$kver"
 cp -a "$modules_dir/." "lib/modules/$kver/"
 depmod -b "$initrd_dir" "$kver"
@@ -123,22 +123,58 @@ depmod -b "$initrd_dir" "$kver"
 # brcm firmware is post-install payload only, never part of the installer initrd.
 rm -rf -- lib/firmware/brcm
 
-cp -- "$preseed" ./preseed.cfg
-
 find . -print0 | cpio --null -o -H newc --quiet | gzip -9 > "$initrd_gz"
-' bash "$INITRD_DIR" "$TREE/install.amd/initrd.gz" "$MODULES_DIR" "$KVER_FULL" "$ROOT/preseed.cfg"
+' bash "$INITRD_DIR" "$TREE/install.amd/initrd.gz" "$MODULES_DIR" "$KVER_FULL"
 
 # Re-extract the packed archive and check device-node types while the same
 # fakeroot metadata session is alive. A separate fakeroot invocation would
 # not retain the fake device metadata created by cpio.
+rm -rf -- "$INITRD_VERIFY_DIR"
 mkdir -p "$INITRD_VERIFY_DIR"
-if ! fakeroot -- bash -c 'set -euo pipefail; cd "$1"; gzip -dc "$2" | cpio -idm --quiet; test -c "$1/dev/console"; test -c "$1/dev/null"' \
+if ! fakeroot -- bash -c 'set -euo pipefail; cd "$1"; gzip -dc "$2" | cpio -idm --quiet; test -c "$1/dev/console"; test -c "$1/dev/null"; test ! -e preseed.cfg' \
   bash "$INITRD_VERIFY_DIR" "$TREE/install.amd/initrd.gz"; then
   rm -rf -- "$INITRD_VERIFY_DIR"
-  echo "ERROR: rebuilt initrd failed validation: /dev/console and /dev/null must be character devices" >&2
+  echo "ERROR: rebuilt initrd failed validation: device nodes must be character devices and preseed.cfg must be absent" >&2
   exit 1
 fi
 rm -rf -- "$INITRD_VERIFY_DIR"
+
+# --- 3a. Preseed is included only by the explicit T2 automated entry ---
+PRESEED_STAGE="$(mktemp -d "$WORK/preseed-stage.XXXXXX")"
+PRESEED_VERIFY_DIR="$(mktemp -d "$WORK/preseed-verify.XXXXXX")"
+cp -- "$ROOT/preseed.cfg" "$PRESEED_STAGE/preseed.cfg"
+(cd "$PRESEED_STAGE" && printf '%s\n' preseed.cfg | cpio -o -H newc --owner=0:0 --quiet) > "$TREE/install.amd/preseed-initrd.cpio"
+chmod 0644 "$TREE/install.amd/preseed-initrd.cpio"
+
+PRESEED_MEMBERS="$(cpio -it < "$TREE/install.amd/preseed-initrd.cpio")"
+if [[ "$PRESEED_MEMBERS" != "preseed.cfg" && "$PRESEED_MEMBERS" != "./preseed.cfg" ]]; then
+  echo "ERROR: preseed initrd must contain only preseed.cfg, found: $PRESEED_MEMBERS" >&2
+  exit 1
+fi
+(cd "$PRESEED_VERIFY_DIR" && cpio -idm --quiet < "$TREE/install.amd/preseed-initrd.cpio")
+if ! cmp -s -- "$ROOT/preseed.cfg" "$PRESEED_VERIFY_DIR/preseed.cfg"; then
+  echo "ERROR: preseed initrd contents differ from $ROOT/preseed.cfg" >&2
+  exit 1
+fi
+if ! grep -q 'localechooser/languagelist select ja' "$PRESEED_VERIFY_DIR/preseed.cfg" ||
+   ! grep -q 'debian-installer/language string ja' "$PRESEED_VERIFY_DIR/preseed.cfg"; then
+  echo "ERROR: preseed must select ja in both localechooser/languagelist and debian-installer/language" >&2
+  exit 1
+fi
+
+cat -- "$TREE/install.amd/preseed-initrd.cpio" "$TREE/install.amd/initrd.gz" > "$TREE/install.amd/initrd-t2auto"
+chmod 0644 "$TREE/install.amd/initrd-t2auto"
+PRESEED_INITRD_SIZE="$(stat -c '%s' "$TREE/install.amd/preseed-initrd.cpio")"
+T2AUTO_INITRD_SIZE="$(stat -c '%s' "$TREE/install.amd/initrd-t2auto")"
+if [[ "$(head -c 6 "$TREE/install.amd/preseed-initrd.cpio")" != "070701" ]] ||
+   [[ "$(head -c 6 "$TREE/install.amd/initrd-t2auto")" != "070701" ]] ||
+   ! cmp -n "$PRESEED_INITRD_SIZE" -- "$TREE/install.amd/preseed-initrd.cpio" "$TREE/install.amd/initrd-t2auto" ||
+   ! tail -c "+$((PRESEED_INITRD_SIZE + 1))" "$TREE/install.amd/initrd-t2auto" | cmp - "$TREE/install.amd/initrd.gz" ||
+   (( T2AUTO_INITRD_SIZE != PRESEED_INITRD_SIZE + $(stat -c '%s' "$TREE/install.amd/initrd.gz") )); then
+  echo "ERROR: combined T2 initrd is not preseed cpio followed by the main initrd" >&2
+  exit 1
+fi
+rm -rf -- "$PRESEED_STAGE" "$PRESEED_VERIFY_DIR"
 
 # --- 4. GRUB / isolinux: preserve normal install as the safe default ---
 # Debian 13.7.0 amd64's top-level entries start with Graphical install, Install.
@@ -165,12 +201,88 @@ set timeout=30
 menuentry --hotkey=t 'Automated install (T2 Proxmox) - uses largest free space' {
     set background_color=black
     linux    /install.amd/vmlinuz auto=true priority=critical preseed/file=/preseed.cfg --- quiet
-    initrd   /install.amd/initrd.gz
+    initrd   /install.amd/initrd-t2auto
 }
 """
 with open(path, "w", encoding="utf-8") as config:
     config.write(src.rstrip() + "\n" + entry.lstrip())
 print("grub.cfg: default=Install, timeout=30, T2 automated entry appended")
+PYEOF
+
+# Verify the preseed appears only in the explicit T2 menu entry and normal Install remains safe.
+python3 - "$TREE/boot/grub/grub.cfg" <<'PYEOF'
+import re
+import sys
+
+path = sys.argv[1]
+src = open(path, encoding="utf-8").read()
+
+def menuentries(text):
+    lines = text.splitlines(keepends=True)
+    entries = []
+    index = 0
+
+    def brace_delta(line):
+        delta = 0
+        quote = None
+        escaped = False
+        for char in line:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif quote:
+                if char == quote:
+                    quote = None
+            elif char in "'\"":
+                quote = char
+            elif char == "#":
+                break
+            elif char == "{":
+                delta += 1
+            elif char == "}":
+                delta -= 1
+        return delta
+
+    enclosing_depth = 0
+    while index < len(lines):
+        if not re.match(r"\s*menuentry\b", lines[index]):
+            enclosing_depth += brace_delta(lines[index])
+            index += 1
+            continue
+        start = index
+        menuentry_depth = 0
+        top_level = enclosing_depth == 0
+        while index < len(lines):
+            menuentry_depth += brace_delta(lines[index])
+            index += 1
+            if menuentry_depth == 0:
+                break
+        if menuentry_depth != 0:
+            raise SystemExit("ERROR: unterminated GRUB menuentry")
+        entries.append(("".join(lines[start:index]), top_level))
+    return entries
+
+entries = menuentries(src)
+marker_count = src.count("--hotkey=t")
+preseed_count = src.count("preseed/file")
+combined_count = src.count("initrd-t2auto")
+if (marker_count, preseed_count, combined_count) != (1, 1, 1):
+    raise SystemExit("ERROR: GRUB must contain exactly one T2 hotkey, preseed path, and combined initrd")
+
+t2_entries = [(entry, top_level) for entry, top_level in entries if "preseed/file" in entry or "initrd-t2auto" in entry]
+expected_title = "Automated install (T2 Proxmox) - uses largest free space"
+if len(t2_entries) != 1 or not t2_entries[0][1] or not re.search(r"(?m)^\s*menuentry\s+--hotkey=t\s+'" + re.escape(expected_title) + r"'\s*\{", t2_entries[0][0]):
+    raise SystemExit("ERROR: only the named top-level T2 automated GRUB menuentry may use the preseed/combined initrd")
+if "auto=true priority=critical preseed/file=/preseed.cfg --- quiet" not in t2_entries[0][0] or "/install.amd/initrd-t2auto" not in t2_entries[0][0]:
+    raise SystemExit("ERROR: T2 automated GRUB entry has incorrect boot arguments or initrd")
+
+install_entries = [entry for entry, _top_level in entries if re.search(r"(?m)^\s*menuentry\s+--hotkey=i\s+'Install'", entry)]
+if len(install_entries) != 1 or "/install.amd/initrd.gz" not in install_entries[0] or "preseed/file" in install_entries[0] or "initrd-t2auto" in install_entries[0]:
+    raise SystemExit("ERROR: stock Install GRUB entry must use only /install.amd/initrd.gz")
+if not re.search(r'(?m)^set default="Install"$', src) or not re.search(r"(?m)^set timeout=30$", src):
+    raise SystemExit('ERROR: GRUB default must be Install with timeout=30')
+print("grub.cfg: preseed gated to the T2 entry; stock Install/default/timeout verified")
 PYEOF
 
 # BIOS (isolinux) fallback; deliberately leave its existing default unchanged.
@@ -194,8 +306,45 @@ cat >> "$TREE/isolinux/txt.cfg" <<'EOF'
 label t2auto
  menu label ^Automated install (T2 Proxmox) - uses largest free space
  kernel /install.amd/vmlinuz
- append auto=true priority=critical preseed/file=/preseed.cfg initrd=/install.amd/initrd.gz --- quiet
+ append auto=true priority=critical preseed/file=/preseed.cfg initrd=/install.amd/initrd-t2auto --- quiet
 EOF
+
+# Verify isolinux also gates the preseed and combined initrd to the t2auto label only.
+python3 - "$TREE/isolinux" <<'PYEOF'
+import re
+import sys
+from pathlib import Path
+
+all_text = []
+label_bodies = []
+for path in sorted(Path(sys.argv[1]).rglob("*.cfg")):
+    src = path.read_text(encoding="utf-8")
+    all_text.append(src)
+    current = None
+    body = []
+    for line in src.splitlines():
+        match = re.match(r"^label\s+(\S+)", line)
+        if match:
+            if current is not None:
+                label_bodies.append((current, "\n".join(body)))
+            current = match.group(1)
+            body = []
+        elif current is not None:
+            body.append(line)
+    if current is not None:
+        label_bodies.append((current, "\n".join(body)))
+combined = "\n".join(all_text)
+t2auto_entries = [body for name, body in label_bodies if name == "t2auto"]
+if len(t2auto_entries) != 1:
+    raise SystemExit("ERROR: isolinux t2auto label is missing")
+if combined.count("preseed/file") != 1 or combined.count("initrd-t2auto") != 1:
+    raise SystemExit("ERROR: isolinux must contain exactly one preseed path and combined initrd")
+if "preseed/file=/preseed.cfg" not in t2auto_entries[0] or "initrd=/install.amd/initrd-t2auto" not in t2auto_entries[0]:
+    raise SystemExit("ERROR: isolinux t2auto label has incorrect preseed or initrd")
+if any("preseed/file" in body or "initrd-t2auto" in body for name, body in label_bodies if name != "t2auto"):
+    raise SystemExit("ERROR: stock isolinux labels must not use preseed or combined initrd")
+print("isolinux: preseed gated to the t2auto label")
+PYEOF
 
 # --- 5. /t2 post-install payload ---
 mkdir -p "$TREE/t2/debs" "$TREE/t2/scripts" "$TREE/t2/systemd"
