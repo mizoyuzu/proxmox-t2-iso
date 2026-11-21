@@ -212,6 +212,10 @@ for package in "${packages[@]}"; do
 done
 if (( packages_missing )); then
   log 'Installing Proxmox VE and required services.'
+  if command -v debconf-set-selections >/dev/null 2>&1; then
+    printf 'postfix postfix/main_mailer_type select Local only\npostfix postfix/mailname string %s\n' "$FQDN" |
+      debconf-set-selections
+  fi
   if ! apt-get install -y "${packages[@]}"; then
     die 'package installation failed; inspect apt output and resolve the repository/dependency issue.'
   fi

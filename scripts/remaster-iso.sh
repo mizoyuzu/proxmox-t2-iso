@@ -41,8 +41,8 @@ if [[ ! -f "$ROOT/scripts/first-boot-proxmox.sh" ]]; then
   echo "ERROR: first-boot script is missing: $ROOT/scripts/first-boot-proxmox.sh" >&2
   exit 1
 fi
-if [[ ! -f "$ROOT/systemd/first-boot-proxmox.service" ]]; then
-  echo "ERROR: first-boot systemd unit is missing: $ROOT/systemd/first-boot-proxmox.service" >&2
+if [[ ! -f "$ROOT/scripts/first-boot-proxmox.service" ]]; then
+  echo "ERROR: first-boot systemd unit is missing: $ROOT/scripts/first-boot-proxmox.service" >&2
   exit 1
 fi
 
