@@ -80,7 +80,7 @@ qemu-system-x86_64 \
 
 `-display gtk` は UEFI/GRUB とインストーラ画面用、`-serial mon:stdio` は QEMU のシリアル接続/モニタ用です。この ISO の通常の GRUB エントリに serial kernel console 引数が含まれるとは限らないため、インストーラ画面は GTK 側で操作してください。QEMU モニタに切り替えるにはシリアル端末で `Ctrl-A` の後 `C` を押します。
 
-起動後、GRUB の通常 **Install** がデフォルトであることを確認します。自動インストールを試す場合は、GRUB の `a` ホットキーを明示的に押して `Automated install (T2 Proxmox)` を選択します。通常 Install を選んだままタイムアウトさせると、自動インストールにはなりません。
+起動後、GRUB の通常 **Install** がデフォルトであることを確認します。自動インストールを試す場合は、GRUB の `t` ホットキーを明示的に押して `Automated install (T2 Proxmox)` を選択します。通常 Install を選んだままタイムアウトさせると、自動インストールにはなりません。
 
 インストーラでは root パスワードを対話入力します。パスワードは記録・共有せず、preseed に追加しません。自動エントリでインストールを完了した後は、インストール済み OS を初回起動する前に VM を poweroff してください。QEMU モニタで `system_powerdown` を実行するか、インストーラの電源オフ操作を使います。first-boot のネットワーク処理を走らせず、インストール直後の状態をオフラインで確認します。
 

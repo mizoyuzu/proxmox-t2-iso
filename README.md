@@ -45,7 +45,7 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 ### 起動メニュー
 
 - GRUB は通常の **Install** をデフォルトにし、タイムアウトは 30 秒です。自動インストールはデフォルトでは起動しません。
-- 自動インストールは GRUB の `--hotkey=a` エントリを明示的に選択した場合のみ実行します。起動引数は `auto=true priority=critical preseed/file=/preseed.cfg` です。
+- 自動インストールは GRUB の `--hotkey=t` エントリを明示的に選択した場合のみ実行します。起動引数は `auto=true priority=critical preseed/file=/preseed.cfg` です。
 - BIOS/isolinux 側のエントリ名は `t2auto` です。
 
 ### preseed のディスク設計
