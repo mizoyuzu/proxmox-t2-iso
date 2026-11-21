@@ -45,16 +45,17 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 ### 起動メニュー
 
 - GRUB は通常の **Install** をデフォルトにし、タイムアウトは 30 秒です。自動インストールはデフォルトでは起動しません。
-- 自動インストールは GRUB の `--hotkey=a` エントリを明示的に選択した場合のみ実行します。起動引数は `auto=true priority=critical preseed/file=/preseed.cfg` です。
+- 自動インストールは GRUB の `--hotkey=t` エントリを明示的に選択した場合のみ実行します。起動引数は `auto=true priority=critical preseed/file=/preseed.cfg` です。
 - BIOS/isolinux 側のエントリ名は `t2auto` です。
 
 ### preseed のディスク設計
 
-以下はこの作業で共有されている確定設計です。preseed の最終内容と実際の partman 動作は VM ドライランで照合してください。
+以下は確定設計です。最終 preseed の F テストを使い捨て VM ディスクで実施した記録は [VM ドライラン](docs/vm-dryrun.md)を参照してください。最終リマスター ISO の CI ビルドと VM 起動確認は別途実施後に記録します。
 
 - インストール対象は `/dev/nvme0n1`、partman の選択方法は `biggest_free` です。`partman-auto/method` は設定しません。
 - 新しいパーティションを空き領域に作ります。既存 ESP を再利用せず、既存の LVM/MD を削除しません。
-- レシピは新規 ESP 512 MiB、`/boot` 1–1.5 GiB、swap 4 GiB、root 20–32 GiB ext4、残り全部を `method{ lvm }` の予約パーティションとします。
+- レシピは新規 ESP 512 MB、`/boot` 1536 MB、swap 4096 MB、root 20480 MB ext4、残り全部を `method{ lvm }` の予約パーティションとします。
+- Debian `expert_recipe` の MB は 10^6 bytes 単位で、parted の MiB/GiB 表示とは異なります。VM での実測表示は、レシピ 512 MB に対して 488.0 MiB、1536 MB に対して 1.4 GiB、4096 MB に対して 3.8 GiB、20480 MB に対して 19.1 GiB でした。
 - partman はこのレシピだけでは VG を作りません。`late_command` が udev の `ID_PART_ENTRY_TYPE` が `E6D6D379-F507-44C2-A23C-238F2A3DF928`（Linux LVM）の予約パーティションを特定し、`pvcreate` / `vgcreate pve` を実行します。
 - この方式では root と swap は通常パーティションであり LV ではありません。thin pool は初回起動時に VG の空き 100% から `pve/data` として作ります。
 
