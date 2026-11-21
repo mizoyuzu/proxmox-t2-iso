@@ -45,8 +45,8 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 ### 起動メニュー
 
 - GRUB は通常の **Install** をデフォルトにし、タイムアウトは 30 秒です。自動インストールはデフォルトでは起動しません。
-- 自動インストールは GRUB の `--hotkey=t` エントリを明示的に選択した場合のみ実行します。起動引数は `auto=true priority=critical preseed/file=/preseed.cfg` です。
-- BIOS/isolinux 側のエントリ名は `t2auto` です。
+- preseed は `/install.amd/preseed-initrd.cpio` に分離し、`/install.amd/initrd-t2auto` を「小さな preseed cpio + `/install.amd/initrd.gz`」として作ります。この combined initrd を使うのは、GRUB の `--hotkey=t` エントリと BIOS/isolinux の `t2auto` エントリだけです。起動引数は `auto=true priority=critical preseed/file=/preseed.cfg` です。
+- stock の **Install** / **Graphical install** / **Advanced options** は通常の `initrd.gz` または `gtk/initrd.gz` を使い、T2 用 preseed は読み込みません。Debian 標準の **Advanced > Automated install** は、このリポジトリの T2 自動インストールではありません。
 
 ### preseed のディスク設計
 

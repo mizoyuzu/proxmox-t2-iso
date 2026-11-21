@@ -82,6 +82,18 @@ qemu-system-x86_64 \
 
 起動後、GRUB の通常 **Install** がデフォルトであることを確認します。自動インストールを試す場合は、GRUB の `t` ホットキーを明示的に押して `Automated install (T2 Proxmox)` を選択します。通常 Install を選んだままタイムアウトさせると、自動インストールにはなりません。
 
+T2 用 preseed は小さな `/install.amd/preseed-initrd.cpio` に分離され、`/install.amd/initrd-t2auto` はその cpio と `/install.amd/initrd.gz` を連結した initrd です。GRUB の T2 自動インストール項目と BIOS/isolinux の `t2auto` だけがこれを使います。stock の Install / Graphical install / Advanced options は main または gtk initrd を使うため preseed を受け取りません。Debian 標準の **Advanced > Automated install** は T2 用の自動インストール項目ではありません。
+
+シリアルコンソールで自動インストールを試す場合は、GRUB メニューで `c` を押してコマンドラインを開き、次のように起動します。
+
+```text
+linux /install.amd/vmlinuz auto=true priority=critical preseed/file=/preseed.cfg console=ttyS0,115200n8 --- quiet
+initrd /install.amd/initrd-t2auto
+boot
+```
+
+シリアルコンソールでは Debian Installer が言語候補を display level 0 に絞るため、通常の候補は C/英語だけです。preseed は `localechooser/languagelist=ja` を質問に直接設定するので、`debian-installer/language=ja` だけでは不足するシリアルを含め、どのコンソールでも言語質問をスキップします。最終 CI ビルドと VM 起動の証跡は実施後にこの文書へ追記します。
+
 インストーラでは root パスワードを対話入力します。パスワードは記録・共有せず、preseed に追加しません。自動エントリでインストールを完了した後は、インストール済み OS を初回起動する前に VM を poweroff してください。QEMU モニタで `system_powerdown` を実行するか、インストーラの電源オフ操作を使います。first-boot のネットワーク処理を走らせず、インストール直後の状態をオフラインで確認します。
 
 ## 4. オフライン検証
