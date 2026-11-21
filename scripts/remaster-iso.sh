@@ -165,7 +165,7 @@ src = re.sub(r"\bvga=788\b[ \t]*", "", src)
 entry = """
 set default=\"Install\"
 set timeout=30
-menuentry --hotkey=a 'Automated install (T2 Proxmox) - uses largest free space' {
+menuentry --hotkey=t 'Automated install (T2 Proxmox) - uses largest free space' {
     set background_color=black
     linux    /install.amd/vmlinuz auto=true priority=critical preseed/file=/preseed.cfg --- quiet
     initrd   /install.amd/initrd.gz
