@@ -24,29 +24,42 @@ jobs:
 
       - name: Install tools
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xorriso cpio kmod
+          sudo apt-get install -y --no-install-recommends xorriso cpio fakeroot kmod
 
       - name: Download Debian netinst ISO (current 13.x)
         run: |
+          set -euo pipefail
           base="https://cdimage.debian.org/debian-cd/current/amd64/iso-cd"
-          iso="$(curl -s "$base/SHA256SUMS" | grep -o 'debian-[0-9.]*-amd64-netinst.iso' | head -1)"
+          sha_sums="$(curl -fsSL "$base/SHA256SUMS")"
+          iso="$(printf '%s\n' "$sha_sums" | grep -o 'debian-[0-9.]*-amd64-netinst.iso' | sed -n '1p')"
+          test -n "$iso"
           echo "ISO: $iso"
-          curl -sLO "$base/$iso"
-          (cd . && grep "$iso" <(curl -s "$base/SHA256SUMS") | sha256sum -c -)
+          curl -fL --retry 2 -o "$iso" "$base/$iso"
+          printf '%s\n' "$sha_sums" | grep -F "$iso" | sha256sum -c -
           echo "DEBIAN_ISO=$iso" >> "$GITHUB_ENV"
 
       - name: Download T2 kernel debs from release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           mkdir -p debs
           gh release download "${{ inputs.kernel_tag }}" --pattern '*.deb' --dir debs
+
+      - name: Firmware policy
+        run: |
+          set -euo pipefail
+          note='Firmware is omitted: set FIRMWARE_DIR for a private/local build; public repository and ISO builds do not include Apple firmware.'
+          echo "NOTE: $note"
+          echo "NOTE: $note" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remaster
         env:
           KERNEL_DEB_DIR: ${{ github.workspace }}/debs
         run: |
+          set -euo pipefail
           chmod +x scripts/remaster-iso.sh
           ./scripts/remaster-iso.sh debian-13-t2-proxmox.iso
 

@@ -1,121 +1,235 @@
 #!/bin/bash
 # remaster-iso.sh — 公式 Debian 13 netinst ISO を T2 用にリマスターする
 #
-# やること:
-#   1. ISO を展開
-#   2. インストーラのカーネルを自作 T2 カーネル (.deb) の vmlinuz に差し替え
-#   3. initrd を再構築: T2 モジュール群 (t2bce / nvme-apple / brcmfmac / appletb)
-#      と Wi-Fi/BT ファームウェアを注入し、preseed.cfg を同梱
-#   4. GRUB メニューに自動インストール項目 (auto=true priority=critical) を追加
-#   5. ISO ツリーに /t2 ペイロード (カーネル .deb 群、ファームウェア、first-boot) を配置
-#   6. El Torito / EFI 構成を保ったまま xorriso で再構築
-#
-# キーボード/トラックパッドについて:
-#   MBP15,1 のキーボードとトラックパッドは T2 (BCE) 経由で VHCI = 仮想 USB HID
-#   として見える。initrd に t2bce_core / t2bce_vhci が入っていればインストーラ
-#   段階から両方使える。TouchBar の表示 (Esc / F キー列) は tiny-dfr デーモンが
-#   描画するため、systemd の無い d-i 環境では光らない。preseed で対話を最小化
-#   してあるので実害は小さいが、保険に USB キーボードがあると安心。
-#   インストール後の実システムでは tiny-dfr が動くので TouchBar も使える。
-#
-# 使い方:
-#   DEBIAN_ISO=debian-13.x-amd64-netinst.iso KERNEL_DEB_DIR=./debs \
-#     ./scripts/remaster-iso.sh [出力ISO名]
-# 前提ツール: xorriso, cpio, dpkg-deb, depmod (kmod)
-# ※ 試験後の実機適用前に、VM (QEMU) でブート確認を必ず行うこと。
+# FIRMWARE_DIR を指定した場合は、そのディレクトリの内容を
+# /t2/firmware/brcm/ に追加する (インストーラ initrd には入れない)。
+# Apple ファームウェアを公開リポジトリへコミットしないこと。
 set -euo pipefail
 
 DEBIAN_ISO="${DEBIAN_ISO:?DEBIAN_ISO is required}"
 KERNEL_DEB_DIR="${KERNEL_DEB_DIR:?KERNEL_DEB_DIR is required}"
 OUT_ISO="${1:-debian-13-t2-proxmox.iso}"
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 WORK="$(pwd)/iso-work"
 TREE="$WORK/tree"
 INITRD_DIR="$WORK/initrd"
 
-rm -rf "$WORK"; mkdir -p "$TREE" "$INITRD_DIR"
+if ! command -v fakeroot >/dev/null 2>&1; then
+  echo "ERROR: fakeroot is required to extract and repack the installer initrd as a non-root user" >&2
+  exit 1
+fi
+for tool in xorriso cpio dpkg-deb depmod python3 gzip md5sum; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "ERROR: required command not found: $tool" >&2
+    exit 1
+  fi
+done
+if [[ ! -r "$DEBIAN_ISO" ]]; then
+  echo "ERROR: Debian ISO is not readable: $DEBIAN_ISO" >&2
+  exit 1
+fi
+if [[ ! -d "$KERNEL_DEB_DIR" ]]; then
+  echo "ERROR: kernel deb directory does not exist: $KERNEL_DEB_DIR" >&2
+  exit 1
+fi
+if [[ ! -f "$ROOT/preseed.cfg" ]]; then
+  echo "ERROR: preseed file is missing: $ROOT/preseed.cfg" >&2
+  exit 1
+fi
+if [[ ! -f "$ROOT/scripts/first-boot-proxmox.sh" ]]; then
+  echo "ERROR: first-boot script is missing: $ROOT/scripts/first-boot-proxmox.sh" >&2
+  exit 1
+fi
+if [[ ! -f "$ROOT/systemd/first-boot-proxmox.service" ]]; then
+  echo "ERROR: first-boot systemd unit is missing: $ROOT/systemd/first-boot-proxmox.service" >&2
+  exit 1
+fi
+
+if [[ -n "${FIRMWARE_DIR:-}" && ! -d "$FIRMWARE_DIR" ]]; then
+  echo "ERROR: FIRMWARE_DIR is set but is not a directory: $FIRMWARE_DIR" >&2
+  exit 1
+fi
+if [[ -n "${SSH_AUTHORIZED_KEYS_FILE:-}" && ! -f "$SSH_AUTHORIZED_KEYS_FILE" ]]; then
+  echo "ERROR: SSH_AUTHORIZED_KEYS_FILE is set but is not a regular file: $SSH_AUTHORIZED_KEYS_FILE" >&2
+  exit 1
+fi
+if [[ "${SSH_AUTHORIZED_KEYS_FILE+x}" == x && -z "$SSH_AUTHORIZED_KEYS_FILE" ]]; then
+  echo "ERROR: SSH_AUTHORIZED_KEYS_FILE is set but empty" >&2
+  exit 1
+fi
+
+shopt -s nullglob
+KERNEL_DEBS=("$KERNEL_DEB_DIR"/linux-image-*.deb)
+shopt -u nullglob
+if (( ${#KERNEL_DEBS[@]} == 0 )); then
+  echo "ERROR: no linux-image-*.deb files found in $KERNEL_DEB_DIR" >&2
+  exit 1
+fi
+
+rm -rf -- "$WORK"
+mkdir -p "$TREE" "$INITRD_DIR"
 
 # --- 1. ISO 展開 ---
-xorriso -osirrox on -indev "$DEBIAN_ISO" -extract / "$TREE" >/dev/null 2>&1
+xorriso -osirrox on -indev "$DEBIAN_ISO" -extract / "$TREE" >/dev/null
 chmod -R u+w "$TREE"
 
+# Debian EFI stub expects the original /.disk/id. Keep it in the extracted tree.
+if [[ ! -e "$TREE/.disk/id" ]]; then
+  echo "ERROR: source ISO does not contain /.disk/id; refusing to rebuild" >&2
+  exit 1
+fi
+
 # --- 2. カーネル .deb から vmlinuz / モジュールを取り出す ---
-KEX="$WORK/kernel-extract"; mkdir -p "$KEX"
-for d in "$KERNEL_DEB_DIR"/linux-image-*.deb; do dpkg-deb -x "$d" "$KEX"; done
-KVMLINUZ="$(ls "$KEX"/boot/vmlinuz-*)"
+KEX="$WORK/kernel-extract"
+mkdir -p "$KEX"
+for deb in "${KERNEL_DEBS[@]}"; do
+  dpkg-deb -x "$deb" "$KEX"
+done
+mapfile -t KERNEL_IMAGES < <(find "$KEX/boot" -maxdepth 1 -type f -name 'vmlinuz-*' -print | sort)
+if (( ${#KERNEL_IMAGES[@]} != 1 )); then
+  echo "ERROR: expected exactly one boot/vmlinuz-* in linux-image debs, found ${#KERNEL_IMAGES[@]}" >&2
+  exit 1
+fi
+KVMLINUZ="${KERNEL_IMAGES[0]}"
 KVER_FULL="$(basename "$KVMLINUZ" | sed 's/^vmlinuz-//')"
+MODULES_DIR="$KEX/lib/modules/$KVER_FULL"
+if [[ ! -d "$MODULES_DIR" ]]; then
+  echo "ERROR: kernel modules are missing from linux-image debs: $MODULES_DIR" >&2
+  exit 1
+fi
 echo "installer kernel: $KVER_FULL"
-cp "$KVMLINUZ" "$TREE/install.amd/vmlinuz"
+cp -- "$KVMLINUZ" "$TREE/install.amd/vmlinuz"
 
 # --- 3. initrd 再構築 ---
-cd "$INITRD_DIR"
-gzip -dc "$TREE/install.amd/initrd.gz" | cpio -idm --quiet
-# T2 + 必須モジュールを丸ごと注入 (依存は depmod で解決)
-mkdir -p "lib/modules/$KVER_FULL"
-cp -a "$KEX/lib/modules/$KVER_FULL/." "lib/modules/$KVER_FULL/"
-depmod -b . "$KVER_FULL"
-# 早期ロードさせるモジュール (キーボード/トラックパッド/SSD/Wi-Fi)
-# 実際には udev の modalias で大半が自動ロードされる。強制ロードは
-# preseed.cfg の preseed/early_command 側でも指定して二重化してある。
-mkdir -p etc/modprobe.d
-for m in t2bce_core t2bce_dma t2bce_vhci nvme_apple brcmfmac hid_appletb_kbd \
-         appletbdrm; do
-  echo "$m" >> etc/modprobe.d/t2-early.conf
-done
-# ファームウェア注入 (Wi-Fi BCM4364 / BT BCM4377 他、実機の実績セット)
-mkdir -p lib/firmware/brcm
-cp -a "$ROOT/firmware-files/brcm/." lib/firmware/brcm/ 2>/dev/null \
-  || echo "WARN: firmware-files/brcm が無い。firmware/ の sha256 目録から実機分を配置すること"
-# preseed を initrd ルートに同梱 (d-i が自動で拾う)
-cp "$ROOT/preseed.cfg" ./preseed.cfg
-find . | cpio -o -H newc --quiet | gzip -9 > "$TREE/install.amd/initrd.gz"
-cd - >/dev/null
+# fakeroot supplies the root/device-node metadata cpio needs without requiring
+# privileges from the Actions runner. Keep the complete custom module tree.
+fakeroot -- sh -c 'set -e; cd "$1"; gzip -dc "$2" | cpio -idm --quiet' \
+  sh "$INITRD_DIR" "$TREE/install.amd/initrd.gz"
+mkdir -p "$INITRD_DIR/lib/modules/$KVER_FULL"
+cp -a "$MODULES_DIR/." "$INITRD_DIR/lib/modules/$KVER_FULL/"
+depmod -b "$INITRD_DIR" "$KVER_FULL"
 
-# --- 4. GRUB / isolinux: 自動インストールを先頭+デフォルトにする ---
-# 実物確認済み (Debian 13.7.0 netinst): /boot/grub/grub.cfg の各 menuentry は
-# /install.amd/vmlinuz + /install.amd/initrd.gz (gtk は gtk/initrd.gz) を使う。
-# EFI 側は /efi/debian/grub.cfg が /.disk/id/<uuid> を探して本 grub.cfg を読む
-# ため、インプレース再構築 (手順6) で .disk/id を壊さないことが重要。
+# brcm firmware is post-install payload only, never part of the installer initrd.
+rm -rf -- "$INITRD_DIR/lib/firmware/brcm"
+
+# Early-load devices used on T2 hardware. NVME_APPLE is Apple-Silicon-only;
+# the T2 SSD uses the standard NVMe driver.
+mkdir -p "$INITRD_DIR/etc/modprobe.d"
+{
+  printf '%s\n' t2bce_core t2bce_dma t2bce_vhci hid_appletb_kbd appletbdrm brcmfmac
+} > "$INITRD_DIR/etc/modprobe.d/t2-early.conf"
+cp -- "$ROOT/preseed.cfg" "$INITRD_DIR/preseed.cfg"
+
+fakeroot -- sh -c 'set -e; cd "$1"; find . -print0 | cpio --null -o -H newc --quiet | gzip -9 > "$2"' \
+  sh "$INITRD_DIR" "$TREE/install.amd/initrd.gz"
+
+# --- 4. GRUB / isolinux: preserve normal install as the safe default ---
+# Debian 13.7.0 amd64's top-level entries start with Graphical install, Install.
+# Put the final global settings after the source config so no later source line
+# can override them, then append the explicitly-selected automated entry.
 python3 - "$TREE/boot/grub/grub.cfg" <<'PYEOF'
+import re
 import sys
+
 path = sys.argv[1]
-src = open(path).read()
-entry = """set default=0
-set timeout=5
-menuentry --hotkey=a 'Automated install (T2 Proxmox)' {
+with open(path, encoding="utf-8") as config:
+    src = config.read()
+
+if not re.search(r"(?m)^menuentry\b[^\n]*'Install'[^\n]*\{", src):
+    raise SystemExit("ERROR: Debian GRUB config has no normal 'Install' menu entry")
+
+# Do not retain earlier assignments that may compete with these final values.
+src = re.sub(r"(?m)^[ \t]*set[ \t]+(?:default|timeout)=.*(?:\n|$)", "", src)
+# vga=788 is deprecated; remove it from the stock Debian entries too.
+src = re.sub(r"\bvga=788\b[ \t]*", "", src)
+entry = """
+set default=\"Install\"
+set timeout=30
+menuentry --hotkey=a 'Automated install (T2 Proxmox) - uses largest free space' {
     set background_color=black
-    linux    /install.amd/vmlinuz auto=true priority=critical vga=788 --- quiet
+    linux    /install.amd/vmlinuz auto=true priority=critical preseed/file=/preseed.cfg --- quiet
     initrd   /install.amd/initrd.gz
 }
 """
-open(path, "w").write(entry + src)
-print("grub.cfg: T2 automated entry prepended")
+with open(path, "w", encoding="utf-8") as config:
+    config.write(src.rstrip() + "\n" + entry.lstrip())
+print("grub.cfg: default=Install, timeout=30, T2 automated entry appended")
 PYEOF
-# BIOS (isolinux) 側にも自動インストール項目を追加 (MBP は UEFI のみだが保険)
+
+# BIOS (isolinux) fallback; deliberately leave its existing default unchanged.
+if [[ ! -f "$TREE/isolinux/txt.cfg" ]]; then
+  echo "ERROR: source ISO is missing /isolinux/txt.cfg" >&2
+  exit 1
+fi
+python3 - "$TREE/isolinux" <<'PYEOF'
+import re
+import sys
+from pathlib import Path
+
+for path in Path(sys.argv[1]).rglob("*.cfg"):
+    src = path.read_text(encoding="utf-8")
+    updated = re.sub(r"\bvga=788\b[ \t]*", "", src)
+    if updated != src:
+        path.write_text(updated, encoding="utf-8")
+PYEOF
 cat >> "$TREE/isolinux/txt.cfg" <<'EOF'
+
 label t2auto
-	menu label ^Automated install (T2 Proxmox)
-	kernel /install.amd/vmlinuz
-	append auto=true priority=critical vga=788 initrd=/install.amd/initrd.gz --- quiet
+ menu label ^Automated install (T2 Proxmox) - uses largest free space
+ kernel /install.amd/vmlinuz
+ append auto=true priority=critical preseed/file=/preseed.cfg initrd=/install.amd/initrd.gz --- quiet
 EOF
 
-# --- 5. /t2 ペイロード ---
-mkdir -p "$TREE/t2/debs" "$TREE/t2/scripts"
-cp "$KERNEL_DEB_DIR"/*.deb "$TREE/t2/debs/"
-cp "$ROOT/scripts/first-boot-proxmox.sh" "$TREE/t2/scripts/"
-chmod +x "$TREE/t2/scripts/first-boot-proxmox.sh"
+# --- 5. /t2 post-install payload ---
+mkdir -p "$TREE/t2/debs" "$TREE/t2/scripts" "$TREE/t2/systemd"
+for deb in "${KERNEL_DEBS[@]}"; do
+  cp -- "$deb" "$TREE/t2/debs/"
+done
+cp -- "$ROOT/scripts/first-boot-proxmox.sh" "$TREE/t2/scripts/first-boot-proxmox.sh"
+chmod 0755 "$TREE/t2/scripts/first-boot-proxmox.sh"
+cp -- "$ROOT/systemd/first-boot-proxmox.service" "$TREE/t2/systemd/first-boot-proxmox.service"
+
+if [[ -n "${FIRMWARE_DIR:-}" ]]; then
+  mkdir -p "$TREE/t2/firmware/brcm"
+  cp -a "$FIRMWARE_DIR"/. "$TREE/t2/firmware/brcm/"
+  echo "Firmware included in post-install payload from FIRMWARE_DIR=$FIRMWARE_DIR"
+else
+  echo "NOTE: FIRMWARE_DIR is unset/empty; /t2/firmware/brcm is omitted per public-repository firmware policy."
+fi
+
+if [[ -n "${SSH_AUTHORIZED_KEYS_FILE:-}" ]]; then
+  mkdir -p "$TREE/t2/ssh"
+  install -m 0600 -- "$SSH_AUTHORIZED_KEYS_FILE" "$TREE/t2/ssh/authorized_keys"
+fi
 
 # --- 6. md5sum 再生成 + ISO 再構築 (インプレース方式) ---
-# 元 ISO を土台にファイルだけ差し替える。El Torito (isolinux + EFI の
-# /boot/grub/efi.img) と /.disk/id/<uuid> は元 ISO のものを保持するのが肝。
-# 一から mkisofs すると EFI スタブが探す .disk/id の UUID がずれてブートしない。
-(cd "$TREE" && find . -type f -print0 | sort -z | xargs -0 md5sum > md5sum.txt)
-xorriso -indev "$DEBIAN_ISO" -outdev "$OUT_ISO" \
-  -boot_image isolinux keep -boot_image grub keep \
-  -map "$TREE" / -commit
+# Keep original El Torito BIOS/EFI boot images and /.disk/id from the source.
+(cd "$TREE" && find . -type f ! -path './md5sum.txt' -print0 | sort -z | xargs -0 -r md5sum > md5sum.txt)
+if [[ "$(realpath -m "$OUT_ISO")" == "$(realpath -e "$DEBIAN_ISO")" ]]; then
+  echo "ERROR: output ISO must not overwrite the Debian source ISO" >&2
+  exit 1
+fi
+cp --reflink=auto -- "$DEBIAN_ISO" "$OUT_ISO"
+if ! xorriso -indev "$OUT_ISO" -outdev "$OUT_ISO" \
+  -boot_image any keep \
+  -map "$TREE" / -commit; then
+  echo "ERROR: xorriso failed to write remastered ISO: $OUT_ISO" >&2
+  exit 1
+fi
 
-# --- 検証: ブートイメージが両方残っていること ---
+# --- Verify both original boot images survived the in-place rebuild ---
 echo "=== El Torito report (BIOS + EFI の2つがあること) ==="
-xorriso -indev "$OUT_ISO" -report_el_torito plain 2>/dev/null | grep -E "El Torito boot img|Boot image" || true
+if ! BOOT_REPORT="$(xorriso -indev "$OUT_ISO" -report_el_torito plain 2>&1)"; then
+  printf '%s\n' "$BOOT_REPORT" >&2
+  echo "ERROR: could not inspect El Torito boot images in $OUT_ISO" >&2
+  exit 1
+fi
+printf '%s\n' "$BOOT_REPORT"
+BOOT_IMAGE_COUNT="$(grep -c 'El Torito boot img' <<< "$BOOT_REPORT" || true)"
+if [[ "$BOOT_IMAGE_COUNT" != 2 ]] || ! grep -q 'BIOS' <<< "$BOOT_REPORT" || ! grep -Eq 'UEFI|EFI' <<< "$BOOT_REPORT"; then
+  echo "ERROR: expected exactly two El Torito boot images (BIOS and EFI), found $BOOT_IMAGE_COUNT" >&2
+  exit 1
+fi
 
-echo "done: $OUT_ISO (ブート実地確認はカーネル .deb が揃ってから QEMU / 実機で)"
+echo "done: $OUT_ISO"
