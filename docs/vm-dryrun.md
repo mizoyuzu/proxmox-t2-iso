@@ -2,7 +2,7 @@
 
 この手順は Debian Installer のパーティション配置、既存パーティションの保持、インストール先のファイル、LVM の状態をオフラインで確認するためのものです。**実機・実ディスクでは実行しないでください。** すべての書き込み先は使い捨ての VM ディスクイメージに限定します。
 
-この文書は検証手順と期待値を示すもので、ここに記した VM テストが実施済みであることを意味しません。最終 preseed に更新後、VM で実際に確認してください。
+2026-11-21 に、使い捨て 64 GiB GPT ディスクと UEFI QEMU で final preseed の F テストを実施しました。p1/p2 の保持、p3–p7 の作成、partman の追加ダイアログがないこと、`late_command` による p7 の `pvcreate` / `vgcreate pve`、空き extents 7937 × 4 MiB（31.00 GiB）を確認済みです。最終リマスター ISO の CI ビルドと VM 起動確認の結果は、実施後にこの文書へ追記します。
 
 ## 1. ホスト要件
 
@@ -101,19 +101,21 @@ sudo sgdisk -i 2 "$LOOP"
 sudo sgdisk -i 7 "$LOOP"
 ```
 
-期待値:
+### 2026-11-21 の実測値
 
-| 番号 | 用途 | 期待サイズ/タイプ |
-| --- | --- | --- |
-| p1 | 事前作成した EFI | 200 MiB、保持される |
-| p2 | 事前作成した Linux filesystem | 8 GiB、保持される |
-| p3 | 新規 ESP | 512 MiB。p1 を再利用しない |
-| p4 | `/boot` | 1–1.5 GiB |
-| p5 | swap | 4 GiB |
-| p6 | root | 20–32 GiB、ext4 |
-| p7 | LVM 予約領域 | 残り全部。Linux LVM type |
+Debian `partman-auto/expert_recipe` のサイズ指定は decimal MB（1 MB = 10^6 bytes）です。以下の MiB/GiB は `parted` 等で確認した binary 単位の表示で、レシピ値とは数値が一致しません。
 
-MiB 表示の端数はセクター境界のアラインメントによって生じます。p1/p2 の開始・終了位置/サイズが事前の表と一致し、p3–p7 が空き領域内に作られていることを確認してください。`sgdisk -i 7` の Partition type GUID は `E6D6D379-F507-44C2-A23C-238F2A3DF928`（Linux LVM）であることを確認します。
+| 番号 | 用途 | レシピ値 / 初期値 | VM での実測 |
+| --- | --- | --- | --- |
+| p1 | 既存 ESP | 200 MiB | 200 MiB、保持。PARTUUID は前後で不変 |
+| p2 | 既存 Linux filesystem | 8192 MiB | 8192 MiB、保持。PARTUUID は前後で不変 |
+| p3 | 新規 ESP | 512 MB | 488.0 MiB。p1 を再利用しない |
+| p4 | `/boot` | 1536 MB | 1.4 GiB |
+| p5 | swap | 4096 MB | 3.8 GiB |
+| p6 | root ext4 | 20480 MB | 19.1 GiB |
+| p7 | LVM 予約領域 | 残り全部 | 31.0 GiB、`LVM2_member` |
+
+p7 は Linux LVM type GUID `E6D6D379-F507-44C2-A23C-238F2A3DF928` で、VG `pve` は 1 PV / 0 LV、`VFree` 31.00 GiB でした。空き extents は 7937 × 4 MiB です。p1/p2 の保持は PARTUUID が前後で不変であることでも確認しました。
 
 ### p1/p2 の保持
 
