@@ -188,7 +188,7 @@ for deb in "${KERNEL_DEBS[@]}"; do
 done
 cp -- "$ROOT/scripts/first-boot-proxmox.sh" "$TREE/t2/scripts/first-boot-proxmox.sh"
 chmod 0755 "$TREE/t2/scripts/first-boot-proxmox.sh"
-cp -- "$ROOT/systemd/first-boot-proxmox.service" "$TREE/t2/systemd/first-boot-proxmox.service"
+cp -- "$ROOT/scripts/first-boot-proxmox.service" "$TREE/t2/systemd/first-boot-proxmox.service"
 
 if [[ -n "${FIRMWARE_DIR:-}" ]]; then
   mkdir -p "$TREE/t2/firmware/brcm"
