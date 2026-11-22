@@ -214,9 +214,9 @@ loop device が切り離され、QEMU が停止していることを確認しま
 - `6.18.56-t2-pve` kernel と initrd が存在し、`first-boot-proxmox.service` は enable 済み。SSH 設定は `PermitRootLogin yes` / `PasswordAuthentication yes`。locale `ja_JP.UTF-8`、keyboard `jp`、timezone `Asia/Tokyo`、hostname `pve-mbp` を確認し、`/tmp/t2-debs` は存在しません。
 - インストール済み `/etc/default/grub` は `GRUB_DEFAULT=0` で、生成済み `grub.cfg` の先頭 entry は T2 kernel を指定。**first-boot script 内の GRUB pin は実行も検証もしていません**（installed OS を起動していないため）。
 
-### 未検証事項とリスク
+### CI8 時点での未検証事項とリスク
 
-実機 T2 hardware は未検証です。公開 ISO に Apple firmware は含みません。インストール済み OS の boot、first-boot PVE provisioning、live SSH、`vmbr0`、first-boot による GRUB pin、および first boot は未検証です。Proxmox Web UI の動作も確認していません。Debian の current point release が変わった場合は ISO を再検証してください。
+CI8 の検証時点では installed OS を起動していませんでした。後続の CI12 では first-boot provisioning のオフライン結果と GRUB pin 後の Boot 2 を検証していますが、SSH ログインと認証後の Proxmox Web UI 操作は未検証です。実機 T2 hardware も未検証で、公開 ISO に Apple firmware は含みません。Debian の current point release が変わった場合は ISO を再検証してください。
 
 証跡一覧: `CI8-FINAL-REPORT.txt`、`CI8-PREFLIGHT.txt`、`CI8-CHECKSUMS.txt`、`CI8-SERIAL-CLEAN.txt`、`ci8-offline-checks.txt`、`ci8-late-command-evidence.txt`、`ci8-installed-grub-defaults.txt`、`ci8-installed-grub.cfg`、`ci8-installed-first-boot.sh`、`run-qemu-ci8.sh`。
 
@@ -228,6 +228,29 @@ r3 kernel/script の VM 検証では first-boot provisioning（`pve-cluster`、t
 
 原因は、インストール済み PVE の grub integration に合わせてメニューを再生成する前に、古い Debian メニューからタイトルを読み取っていたことです。以前の検証は `set default` が要求した文字列と一致することしか確認せず、現在のメニューに同じタイトルの non-recovery T2 entry があるかを確認していませんでした。`scripts/first-boot-proxmox.sh` は、先に `update-grub` を実行してから実際の submenu/entry 表示名を導出し、その値を `GRUB_DEFAULT` に書き込み、`GRUB_TIMEOUT=10` として再度 `update-grub` を実行します。再生成後は default と non-recovery T2 entry の両方を検証します。回帰テストでは、意図的に古い Debian default を残した PVE 表示名の GRUB fixture を使用します。
 
-このコード修正と shell test は **VM 再検証ではありません**。修正版の起動、first-boot による GRUB pin、Boot 2 での T2 kernel 選択は、使い捨て VM で再検証が必要です。今回の修正に実機または実ディスクは使用していません。同じ CI10 証跡には `pve-firewall: iptables-restore: unable to initialize table 'raw'` も記録されていますが、これは別の kernel 設定課題であり、今回変更していません。
+CI10 時点ではこのコード修正と shell test のみで、**VM 再検証は未実施**でした。その後の CI12 VM 再検証結果を次節に記録します。CI10 の証跡にあった `pve-firewall: iptables-restore: unable to initialize table 'raw'` は CI12 の serial coverage が不完全なため、解消を確認できていません。kernel 設定は変更していません。
 
 証跡 bundle: `r4-firstboot-evidence/CI10-FIRSTBOOT-REPORT.txt`、`offline-boot1-grub-menu.txt`、`grub-after-boot1.cfg` / `grub-boot1-final.cfg`。
+
+<a id="ci12-grub-pin-vm-reverification-2026-11-22"></a>
+
+## CI12 GRUB pin VM 再検証 (2026-11-22)
+
+CI10 で失敗した GRUB pin の修正を、CI8 のインストール済みディスクを使った使い捨て VM で再検証しました。これは ISO からのフルインストールではありません。
+
+| 項目 | 結果 | 観測内容 |
+| --- | --- | --- |
+| 検証方法 | — | `/work/system-ci8.raw`（CI8 インストール済み raw、read-only）を元に新規 qcow2 overlay を作成し、r3 kernel `6.18.56-3`（deb SHA-256 prefix `e3738d3e…`）と W10 first-boot script（SHA-256 prefix `88d5e2df…`）を注入。実機不使用。 |
+| Boot 1 オフライン検査 | **PASS** | marker と first-boot log に `Provisioning complete.`、PVE 表示名による GRUB pin 検証、`GRUB_DEFAULT` / set default の `Advanced options for Proxmox VE GNU/Linux>Proxmox VE GNU/Linux, with Linux 6.18.56-t2-pve`、`GRUB_TIMEOUT=10`、non-recovery T2 entry の存在を確認。`pve/data` thin pool、`local-lvm`、dpkg の `6.18.56-3`、SSH/PVE services の enable、`vmbr0`（`enp0s3` DHCP）も確認。SSH banner は観測したがログインはしていない。8006 は HEAD 501。 |
+| Boot 1 serial milestone visibility | **INCONCLUSIVE** | serial は 910 bytes で kernel handoff 後に停止し、watcher は 1500 秒で timeout。`Started pve-cluster.service` の serial 行は取得できていない。first-boot 完了は上記のオフライン marker/log で確認。 |
+| Boot 2 | **PASS** | 同じ overlay と `OVMF_VARS` を使用し、キー入力なしで起動。serial に `Booting 'Advanced options for Proxmox VE GNU/Linux'`、T2 kernel entry、`Loading Linux 6.18.56-t2-pve ...` を確認。`7.0.14-30-pve` はロードされず（`debian_kernel_loaded=false`）。marker が残り、first-boot log SHA-256 prefix `5c713108…` は不変で、first-boot は再実行されていない。SSH banner を観測（ログインなし）、8006 は HEAD 501 / GET 200。QEMU は powerdown 後に終了。 |
+| CI8 raw の不変性 / 証跡 | **PASS** | raw の size `68719476736`、mtime `1795302136`、inode `7654673` は前後で不変。証跡 94 件の checksum を検証。qcow2 overlay 自体は証跡 bundle に含めていない。 |
+| `pve-firewall` raw table 警告 | **INCONCLUSIVE** | 取得できたログでは `iptables-restore ... table 'raw'` を確認できない。serial coverage が不完全なため、警告の有無・解消は判定していない。変更もしていない。 |
+
+### 境界と証跡
+
+- CI12 は CI8 のインストール済み raw をベースに kernel/script を注入した overlay 検証であり、ISO のフルインストールや、その経路での kernel/script 配置は検証していません。
+- Boot 1 の serial milestone は INCONCLUSIVE です。offline の marker/log で first-boot 完了を確認した結果と混同しないでください。
+- SSH banner の観測は SSH ログインの成功を意味しません。8006 の HTTP 応答も、認証後の Proxmox Web UI 操作を検証したものではありません。
+- MacBookPro15,1 実機、実ディスク、実機の EFI・画面・各デバイス動作は未検証です。
+- 証跡 bundle: `/mnt/data/mizoyuzu/Projects/personal/proxmox-t2-iso-vmtest/r5-grub-pin-fix/CI12-GRUB-PIN-REPORT.txt`、`SHA256SUMS.txt`。checksum 94 件を検証済みです。
