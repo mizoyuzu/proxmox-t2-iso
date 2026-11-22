@@ -137,7 +137,8 @@ grub_t2_default() {
         }
       }
 
-      if (in_menuentry && line ~ /^[[:space:]]*linux(efi|16|efi16)?[[:space:]]/ && tolower(line) ~ /t2-pve/) {
+      if (in_menuentry && tolower(entry_title) !~ /\(recovery mode\)$/ &&
+          line ~ /^[[:space:]]*linux(efi|16|efi16)?[[:space:]]/ && tolower(line) ~ /t2-pve/) {
         found = 1
         print entry_title
         exit
@@ -162,6 +163,40 @@ grub_default_matches() {
     }
     END { exit !found }
   ' "$config"
+}
+
+write_grub_defaults() {
+  local defaults_file=$1 wanted=$2 quoted defaults_line defaults_tmp
+  printf -v quoted '%q' "$wanted"
+  defaults_line="GRUB_DEFAULT=${quoted}"
+  defaults_tmp=$(mktemp "${defaults_file}.XXXXXX") || return 1
+  if ! GRUB_DEFAULT_LINE="$defaults_line" awk '
+    BEGIN { default_done = 0; timeout_done = 0 }
+    /^[[:space:]]*GRUB_DEFAULT=/ {
+      if (!default_done) print ENVIRON["GRUB_DEFAULT_LINE"]
+      default_done = 1
+      next
+    }
+    /^[[:space:]]*GRUB_TIMEOUT=/ {
+      if (!timeout_done) print "GRUB_TIMEOUT=10"
+      timeout_done = 1
+      next
+    }
+    { print }
+    END {
+      if (!default_done) print ENVIRON["GRUB_DEFAULT_LINE"]
+      if (!timeout_done) print "GRUB_TIMEOUT=10"
+    }
+  ' "$defaults_file" > "$defaults_tmp"; then
+    rm -f "$defaults_tmp"
+    return 1
+  fi
+  if ! chmod --reference="$defaults_file" "$defaults_tmp" ||
+     ! chown --reference="$defaults_file" "$defaults_tmp" ||
+     ! mv "$defaults_tmp" "$defaults_file"; then
+    rm -f "$defaults_tmp"
+    return 1
+  fi
 }
 
 log 'Setting the system hostname to pve-mbp (FQDN pve-mbp.local).'
@@ -274,56 +309,37 @@ else
 fi
 
 log 'Pinning GRUB to the installed T2 PVE kernel.'
-if [[ ! -r "$GRUB_CFG" ]] || ! T2_DEFAULT=$(grub_t2_default "$GRUB_CFG"); then
-  log "${GRUB_CFG} is unreadable or has no T2 entry; regenerating GRUB configuration once."
-  if ! update-grub; then
-    die "update-grub failed while regenerating ${GRUB_CFG}."
-  fi
+if ! update-grub; then
+  die "update-grub failed while refreshing the installed PVE menu in ${GRUB_CFG}."
 fi
 if [[ ! -r "$GRUB_CFG" ]] || ! T2_DEFAULT=$(grub_t2_default "$GRUB_CFG"); then
   die "no GRUB menuentry with a linux line using a t2-pve kernel was found in ${GRUB_CFG}."
 fi
-# GRUB menuentry IDs inside a submenu are scoped to that submenu; a bare child
-# ID does not select the child. Use the visible `Parent>Title` path (or Title
-# for a top-level entry), which GRUB resolves correctly at any menu depth.
-printf -v GRUB_DEFAULT_QUOTED '%q' "$T2_DEFAULT"
+# Derive the visible `Parent>Title` path from the freshly generated menu. PVE
+# may replace Debian's distributor title during package installation, so a
+# path read before update-grub can be stale even when it names the T2 kernel.
 current_grub_default=$(sed -n 's/^GRUB_DEFAULT=//p' /etc/default/grub | head -n 1)
 current_grub_timeout=$(sed -n 's/^GRUB_TIMEOUT=//p' /etc/default/grub | head -n 1)
+printf -v GRUB_DEFAULT_QUOTED '%q' "$T2_DEFAULT"
 if [[ "$current_grub_default" == "$GRUB_DEFAULT_QUOTED" && "$current_grub_timeout" == 10 ]] && grub_default_matches "$T2_DEFAULT" "$GRUB_CFG"; then
   log "GRUB is already pinned to ${T2_DEFAULT}; skipping update-grub."
 else
-  GRUB_DEFAULT_LINE="GRUB_DEFAULT=${GRUB_DEFAULT_QUOTED}"
-  export GRUB_DEFAULT_LINE
-  grub_defaults_tmp=$(mktemp /etc/default/grub.XXXXXX)
-  awk '
-    BEGIN { default_done = 0; timeout_done = 0 }
-    /^[[:space:]]*GRUB_DEFAULT=/ {
-      if (!default_done) print ENVIRON["GRUB_DEFAULT_LINE"]
-      default_done = 1
-      next
-    }
-    /^[[:space:]]*GRUB_TIMEOUT=/ {
-      if (!timeout_done) print "GRUB_TIMEOUT=10"
-      timeout_done = 1
-      next
-    }
-    { print }
-    END {
-      if (!default_done) print ENVIRON["GRUB_DEFAULT_LINE"]
-      if (!timeout_done) print "GRUB_TIMEOUT=10"
-    }
-  ' /etc/default/grub > "$grub_defaults_tmp"
-  chmod --reference=/etc/default/grub "$grub_defaults_tmp"
-  chown --reference=/etc/default/grub "$grub_defaults_tmp"
-  mv "$grub_defaults_tmp" /etc/default/grub
-  unset GRUB_DEFAULT_LINE
-  update-grub
-  if ! grub_default_matches "$T2_DEFAULT" "$GRUB_CFG"; then
-    grep -n 'set default=' "$GRUB_CFG" || true
-    die "update-grub did not generate the expected default '${T2_DEFAULT}'."
+  if ! write_grub_defaults /etc/default/grub "$T2_DEFAULT"; then
+    die 'could not write the GRUB default and timeout settings.'
   fi
-  log "Verified generated GRUB default: ${T2_DEFAULT}."
+  update-grub
 fi
+if ! GENERATED_T2_DEFAULT=$(grub_t2_default "$GRUB_CFG"); then
+  die "regenerated ${GRUB_CFG} has no non-recovery T2 menuentry."
+fi
+if [[ "$GENERATED_T2_DEFAULT" != "$T2_DEFAULT" ]]; then
+  die "T2 menuentry changed after update-grub (expected '${T2_DEFAULT}', found '${GENERATED_T2_DEFAULT}')."
+fi
+if ! grub_default_matches "$T2_DEFAULT" "$GRUB_CFG"; then
+  grep -n 'set default=' "$GRUB_CFG" || true
+  die "update-grub did not generate the expected default '${T2_DEFAULT}'."
+fi
+log "Verified generated GRUB default and non-recovery T2 menuentry: ${T2_DEFAULT}."
 
 if dpkg-query -W -f='${db:Status-Status}' linux-image-amd64 2>/dev/null | grep -qx installed; then
   log 'Removing only the Debian linux-image-amd64 metapackage.'
