@@ -16,6 +16,10 @@ on:
         description: "linux-t2-patches のブランチ"
         required: true
         default: "6.18"
+      revision:
+        description: "Debian package revision"
+        required: true
+        default: "1"
 
 permissions:
   contents: write
@@ -26,6 +30,23 @@ jobs:
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: release-tag
+        env:
+          KVER: ${{ inputs.kver }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$REVISION" =~ ^[1-9][0-9]*$ ]]; then
+            echo "revision must be a positive integer" >&2
+            exit 1
+          fi
+          tag="kernel-${KVER}-t2-pve"
+          if [ "$REVISION" != "1" ]; then
+            tag="${tag}-r${REVISION}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Install build dependencies
         run: |
@@ -39,6 +60,7 @@ jobs:
         env:
           KVER: ${{ inputs.kver }}
           PATCH_BRANCH: ${{ inputs.patch_branch }}
+          KDEB_REVISION: ${{ inputs.revision }}
         run: |
           chmod +x scripts/build-kernel.sh
           ./scripts/build-kernel.sh
@@ -47,7 +69,7 @@ jobs:
         if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-${{ inputs.kver }}-t2-pve
+          name: kernel-${{ inputs.kver }}-t2-pve-r${{ inputs.revision }}
           path: out/*.deb
           retention-days: 30
 
@@ -55,10 +77,12 @@ jobs:
         if: ${{ success() }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: kernel-${{ inputs.kver }}-t2-pve
+          tag_name: ${{ steps.release-tag.outputs.tag }}
           name: T2 kernel ${{ inputs.kver }} for Proxmox (Debian 13)
           files: out/*.deb
           body: |
             mainline ${{ inputs.kver }} + linux-t2-patches (${{ inputs.patch_branch }})
             Proxmox ホスト向け config (KVM/VFIO/LXC/bridge + T2 ドライバ)。
             ZFS は含まない (LVM-thin / ext4 前提)。
+            Package revision: ${{ inputs.revision }}.
+            Includes CONFIG_DM_THIN_PROVISIONING (dm-thin-pool) for PVE local-lvm.

@@ -6,11 +6,12 @@
 # 検証済み: linux-6.18.56 に対し 6.18 ブランチの全24パッチが無競合で適用できる
 #           (patch-apply-verification-6.18.56.txt)。
 #
-# 使い方: KVER=6.18.56 PATCH_BRANCH=6.18 ./scripts/build-kernel.sh
+# 使い方: KVER=6.18.56 PATCH_BRANCH=6.18 KDEB_REVISION=2 ./scripts/build-kernel.sh
 # 成果物: ../out/*.deb (linux-image / linux-headers)
 set -euo pipefail
 
 KVER="${KVER:-6.18.56}"
+KDEB_REVISION="${KDEB_REVISION:-1}"
 PATCH_BRANCH="${PATCH_BRANCH:-6.18}"
 LOCALVERSION="${LOCALVERSION:--t2-pve}"
 WORK="$(pwd)/build"
@@ -58,9 +59,11 @@ done < ../../config-required.txt
 [ "$missing" -eq 0 ] || { echo "config assertion failed" >&2; exit 1; }
 
 # --- ビルド & .deb 化 ---
+KDEB_PKGVERSION="${KVER}-${KDEB_REVISION}"
+echo "Building kernel packages with package version ${KDEB_PKGVERSION}"
 make -j"$(nproc)" bindeb-pkg \
   LOCALVERSION="$LOCALVERSION" \
-  KDEB_PKGVERSION="${KVER}-1" \
+  KDEB_PKGVERSION="$KDEB_PKGVERSION" \
   DPKG_FLAGS="-d"
 
 mv ../*.deb "$OUT/" 2>/dev/null || mv ./*.deb "$OUT/" 2>/dev/null || \

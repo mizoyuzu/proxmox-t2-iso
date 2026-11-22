@@ -1,6 +1,10 @@
 # config-fragment.txt — options added to defconfig and the T2 extra config.
 # Proxmox host networking/resource controls and MacBookPro15,1 hardware support.
 
+# --- Device mapper thin provisioning (PVE local-lvm) ---
+# PVE local-lvm needs the dm-thin-pool target to create its LVM thin pool.
+CONFIG_DM_THIN_PROVISIONING=m
+
 # --- KVM / VFIO (VMs and passthrough) ---
 CONFIG_KVM=y
 CONFIG_KVM_INTEL=m

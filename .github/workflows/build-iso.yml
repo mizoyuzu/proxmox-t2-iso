@@ -10,7 +10,7 @@ on:
       kernel_tag:
         description: "カーネル .deb のリリースタグ"
         required: true
-        default: "kernel-6.18.56-t2-pve"
+        default: "kernel-6.18.56-t2-pve-r2"
 
 permissions:
   contents: read
