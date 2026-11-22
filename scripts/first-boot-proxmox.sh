@@ -32,10 +32,32 @@ on_error() {
 }
 trap on_error ERR
 
+# network-online.target can precede DHCP completion, so wait for actual IPv4/DNS.
+wait_for_network() {
+  local timeout=120 interval=2 elapsed=0 default_route
+  log 'Waiting for IPv4 connectivity and DNS before provisioning.'
+  while (( elapsed <= timeout )); do
+    default_route=$(ip route show default 2>/dev/null || true)
+    if ip -o -4 addr show scope global 2>/dev/null | grep -q 'inet ' &&
+       [[ -n "$default_route" ]] &&
+       getent ahostsv4 enterprise.proxmox.com >/dev/null 2>&1; then
+      log 'Network is ready.'
+      return 0
+    fi
+    if (( elapsed >= timeout )); then
+      break
+    fi
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+  done
+  die 'timed out after 120 seconds waiting for IPv4 connectivity and DNS; check the wired NIC, DHCP, and DNS, then rerun.'
+}
+
 # A manual rerun is a fresh attempt. The marker is committed only after every
 # provisioning step succeeds, so a failed rerun must not leave stale success.
 rm -f "$MARKER"
 export DEBIAN_FRONTEND=noninteractive
+wait_for_network
 
 grub_t2_default() {
   awk '
@@ -170,7 +192,7 @@ fi
 log 'Configuring the Proxmox VE Trixie no-subscription repository.'
 install -d -m 0755 /usr/share/keyrings
 key_tmp=$(mktemp)
-if ! curl -fsSL https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg -o "$key_tmp"; then
+if ! curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg -o "$key_tmp"; then
   rm -f "$key_tmp"
   die 'could not download the Proxmox archive keyring.'
 fi

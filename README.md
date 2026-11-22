@@ -6,7 +6,7 @@ MacBookPro15,1 (Apple T2) 向けに、Debian 13 netinst ISO をリマスター�
 
 ## ビルド方針
 
-- カーネルは `config-fragment.txt`、`config-required.txt`、`scripts/build-kernel.sh`、`build-kernel.yml` などカーネル関連ファイルを変更したまとまりごとに一度だけビルドします。通常は既存 Release **`kernel-6.18.56-t2-pve`** を再利用します。
+- カーネルは `config-fragment.txt`、`config-required.txt`、`scripts/build-kernel.sh`、`build-kernel.yml` などカーネル関連ファイルを変更したまとまりごとに一度だけビルドします。通常は Release **`kernel-6.18.56-t2-pve-r3`** を再利用します。
 - ISO はマイルストーン時のみビルドします。ドキュメントや小さな変更のたびにカーネル/ISO のフルビルドは行いません。
 - `build-kernel.yml` は成功した場合のみ artifact と Release を公開します。ISO workflow は Release からカーネル `.deb` を取得します。
 
@@ -26,7 +26,7 @@ Release からカーネルパッケージを取得する例:
 
 ```sh
 mkdir -p debs
-gh release download kernel-6.18.56-t2-pve --pattern '*.deb' --dir debs
+gh release download kernel-6.18.56-t2-pve-r3 --pattern '*.deb' --dir debs
 ```
 
 オプションの環境変数:
@@ -98,6 +98,8 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 - mainline Linux **6.18.56** に `linux-t2-patches` の **6.18** ブランチを適用します。パッチ 24 件の適用は `patch-apply-verification-6.18.56.txt` に記録されています。
 - `defconfig` と T2 側 `extra_config` に `config-fragment.txt` をマージし、`config-required.txt` の各設定をビルド前にアサートします。
 - `FB_EFI` と framebuffer/console の依存チェーン、PVE 用 nftables/ipset/bridge/cgroup 機能を設定・検査します。
+- PVE の `local-lvm` 用に `CONFIG_DM_THIN_PROVISIONING=m` (`dm-thin-pool`) と依存モジュールを含めます。パッケージリビジョン 2 はこのカーネル設定の修正です。旧 r1 は first-boot の thin pool 作成に使えません。
+- `CONFIG_FUSE_FS=y` は pmxcfs (`pve-cluster` が `/etc/pve` を mount) と lxcfs に必須です。r2 は FUSE が欠落していたため first-boot の `pve-cluster` 起動に失敗し、first-boot を完了できません。FUSE を含む r3 が最初の first-boot 可能リリースです。
 - T2 Mac の内蔵 SSD は標準 NVMe として扱います。`BLK_DEV_NVME` を使用し、Apple Silicon 向け `NVME_APPLE` は使いません。
 - このカーネルは Proxmox の PVE カーネルそのものではなく、mainline + T2 patches に PVE ホスト用設定を加えたものです。ZFS は対象外で、ストレージ設計は ext4 + LVM-thin です。
 
