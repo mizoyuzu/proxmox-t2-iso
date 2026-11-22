@@ -85,4 +85,4 @@ jobs:
             Proxmox ホスト向け config (KVM/VFIO/LXC/bridge + T2 ドライバ)。
             ZFS は含まない (LVM-thin / ext4 前提)。
             Package revision: ${{ inputs.revision }}.
-            Includes CONFIG_DM_THIN_PROVISIONING (dm-thin-pool) for PVE local-lvm.
+            Includes CONFIG_DM_THIN_PROVISIONING (dm-thin-pool) for PVE local-lvm and CONFIG_FUSE_FS (pmxcfs).
