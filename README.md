@@ -121,7 +121,7 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 - root と swap は LVM LV ではなく通常パーティションです。
 - 既存 ESP は再利用・変更せず、別の ESP を作る設計です。実ディスク上での共存動作は未検証です。
 - MacBookPro15,1 の T2 実機での EFI 起動、画面表示、各デバイス動作は未検証です。カーネル設定のアサートや VM 成功だけで実機動作を保証するものではありません。
-- CI8 では使い捨て VM 上のインストール完了とオフライン状態を確認しましたが、インストール済み OS は起動していません。実機インストール、first-boot の PVE 構成、ライブ SSH、`vmbr0`、first-boot による GRUB pin、および first boot は未検証です。
+- CI10 の r3 VM では first-boot の PVE 構成、thin pool、SSH、管理 endpoint は PASS でしたが、GRUB pin は FAIL し、Boot 2 で標準 PVE kernel が選ばれました。生成済み PVE メニューから pin 先を導出する修正を追加しましたが、修正版の VM 再検証は未実施です。CI8 の新規インストール VM では OS を起動していません。実機動作も未検証です。
 - 初回の Proxmox パッケージ導入にはネットワーク接続が必要です。有線 NIC が認識されない場合、`vmbr0` は作成されません。
 - 公開 CI ISO には Apple ファームウェアがありません。無線デバイスの動作を保証しません。
 - Debian の current point release が変わると、再ビルド ISO の内容やインストーラ挙動も変わる可能性があります。
@@ -134,7 +134,7 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 - オフライン検査では p1/p2 のマーカーと PARTUUID を保持し、p3 vfat、p4 ext4、p5 swap、p6 ext4、p7 LVM2_member を確認。VG `pve` は 1 PV / 0 LV、空き 33,290,190,848 bytes。T2 kernel/initrd、first-boot service、SSH 設定、locale/keyboard/timezone、hostname、および `/tmp/t2-debs` 不在も確認。`GRUB_DEFAULT=0` と T2 kernel が先頭の生成済み GRUB 項目を確認しましたが、first-boot script による GRUB pin は実行・検証していません。
 - 操作者による最初の GRUB キー入力は中断され、後の余分な tab/input で一時インストーラーメニューへ戻りましたが、インストーラを再開して完了しました。コード障害は観測されていません。
 
-検証の詳細と境界（PVE first-boot 構成、live SSH、`vmbr0`、GRUB pin、first boot、および実機動作は未検証）は [docs/vm-dryrun.md](docs/vm-dryrun.md#ci8-最終検証結果-2026-11-21) を参照してください。
+検証の詳細と境界（CI10 の GRUB pin failure、修正内容、未実施の再検証、および別件の `iptables-restore` 警告）は [docs/vm-dryrun.md](docs/vm-dryrun.md#ci10-grub-pin) を参照してください。
 
 ## VM での確認
 

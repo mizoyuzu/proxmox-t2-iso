@@ -219,3 +219,15 @@ loop device が切り離され、QEMU が停止していることを確認しま
 実機 T2 hardware は未検証です。公開 ISO に Apple firmware は含みません。インストール済み OS の boot、first-boot PVE provisioning、live SSH、`vmbr0`、first-boot による GRUB pin、および first boot は未検証です。Proxmox Web UI の動作も確認していません。Debian の current point release が変わった場合は ISO を再検証してください。
 
 証跡一覧: `CI8-FINAL-REPORT.txt`、`CI8-PREFLIGHT.txt`、`CI8-CHECKSUMS.txt`、`CI8-SERIAL-CLEAN.txt`、`ci8-offline-checks.txt`、`ci8-late-command-evidence.txt`、`ci8-installed-grub-defaults.txt`、`ci8-installed-grub.cfg`、`ci8-installed-first-boot.sh`、`run-qemu-ci8.sh`。
+
+<a id="ci10-grub-pin"></a>
+
+## CI10 first-boot GRUB pin failure と修正 (2026-11-22)
+
+r3 kernel/script の VM 検証では first-boot provisioning（`pve-cluster`、thin pool、SSH、PVE 管理 endpoint を含む）は完了しましたが、**GRUB pin は FAIL** でした。`/etc/default/grub` は `Advanced options for Debian GNU/Linux>Debian GNU/Linux, with Linux 6.18.56-t2-pve` を選択していた一方、PVE 導入後に生成されたメニュー名は `Advanced options for Proxmox VE GNU/Linux>Proxmox VE GNU/Linux, with Linux 6.18.56-t2-pve` でした。そのため Boot 2 では T2 kernel ではなく、先頭の PVE kernel `7.0.14-30-pve` が選択されました。
+
+原因は、インストール済み PVE の grub integration に合わせてメニューを再生成する前に、古い Debian メニューからタイトルを読み取っていたことです。以前の検証は `set default` が要求した文字列と一致することしか確認せず、現在のメニューに同じタイトルの non-recovery T2 entry があるかを確認していませんでした。`scripts/first-boot-proxmox.sh` は、先に `update-grub` を実行してから実際の submenu/entry 表示名を導出し、その値を `GRUB_DEFAULT` に書き込み、`GRUB_TIMEOUT=10` として再度 `update-grub` を実行します。再生成後は default と non-recovery T2 entry の両方を検証します。回帰テストでは、意図的に古い Debian default を残した PVE 表示名の GRUB fixture を使用します。
+
+このコード修正と shell test は **VM 再検証ではありません**。修正版の起動、first-boot による GRUB pin、Boot 2 での T2 kernel 選択は、使い捨て VM で再検証が必要です。今回の修正に実機または実ディスクは使用していません。同じ CI10 証跡には `pve-firewall: iptables-restore: unable to initialize table 'raw'` も記録されていますが、これは別の kernel 設定課題であり、今回変更していません。
+
+証跡 bundle: `r4-firstboot-evidence/CI10-FIRSTBOOT-REPORT.txt`、`offline-boot1-grub-menu.txt`、`grub-after-boot1.cfg` / `grub-boot1-final.cfg`。
