@@ -88,7 +88,7 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 
 スクリプトの処理内容:
 
-- Proxmox VE の `pve-no-subscription` リポジトリと署名鍵を設定し、`proxmox-ve`、`postfix`、`open-iscsi`、`chrony`、`ifupdown2` を導入。
+- Proxmox VE の `pve-no-subscription` リポジトリと署名鍵を設定し、`proxmox-ve`、`postfix`、`open-iscsi`、`chrony`、`ifupdown2` を導入。`pve-manager` が作る標準の `pve-enterprise.sources` stanza は初回 apt 更新前とパッケージ導入後に無効化します。無関係な apt source と旧式の `.list` ファイルは変更しません。
 - VG `pve` の存在を必須確認し、その空き extents の 100% から thin pool `pve/data` を作成して `local-lvm` として登録。
 - インストール済み T2 カーネルを GRUB の **Parent>Title** 形式でデフォルト固定し、`GRUB_TIMEOUT=10` に設定。削除対象は Debian の `linux-image-amd64` メタパッケージのみ。
 - 有線 NIC を使う `vmbr0` 設定を作成し、Proxmox 関連サービスと SSH を enable。

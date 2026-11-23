@@ -42,6 +42,10 @@ if [[ ! -f "$ROOT/scripts/first-boot-proxmox.sh" ]]; then
   echo "ERROR: first-boot script is missing: $ROOT/scripts/first-boot-proxmox.sh" >&2
   exit 1
 fi
+if [[ ! -f "$ROOT/scripts/disable-pve-enterprise-source.sh" ]]; then
+  echo "ERROR: PVE enterprise source helper is missing: $ROOT/scripts/disable-pve-enterprise-source.sh" >&2
+  exit 1
+fi
 if [[ ! -f "$ROOT/scripts/first-boot-proxmox.service" ]]; then
   echo "ERROR: first-boot systemd unit is missing: $ROOT/scripts/first-boot-proxmox.service" >&2
   exit 1
@@ -436,6 +440,8 @@ for deb in "${KERNEL_DEBS[@]}"; do
 done
 cp -- "$ROOT/scripts/first-boot-proxmox.sh" "$TREE/t2/scripts/first-boot-proxmox.sh"
 chmod 0755 "$TREE/t2/scripts/first-boot-proxmox.sh"
+cp -- "$ROOT/scripts/disable-pve-enterprise-source.sh" "$TREE/t2/scripts/disable-pve-enterprise-source.sh"
+chmod 0755 "$TREE/t2/scripts/disable-pve-enterprise-source.sh"
 cp -- "$ROOT/scripts/partman-t2-guard.sh" "$TREE/t2/scripts/partman-t2-guard.sh"
 chmod 0755 "$TREE/t2/scripts/partman-t2-guard.sh"
 cp -- "$ROOT/scripts/first-boot-proxmox.service" "$TREE/t2/systemd/first-boot-proxmox.service"

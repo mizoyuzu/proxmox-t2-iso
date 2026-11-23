@@ -5,6 +5,7 @@ set -euo pipefail
 readonly MARKER=/var/lib/first-boot-proxmox.done
 readonly LOG_FILE=/var/log/first-boot-proxmox.log
 readonly GRUB_CFG=/boot/grub/grub.cfg
+readonly DISABLE_PVE_ENTERPRISE_SOURCE=/usr/local/sbin/disable-pve-enterprise-source.sh
 
 if [[ $(id -u) -ne 0 ]]; then
   printf 'ERROR: run this script as root.\n' >&2
@@ -259,6 +260,14 @@ Components: pve-no-subscription
 Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
 EOF
 
+# pve-manager installs its enterprise deb822 source. Disable that canonical
+# package stanza before every update so a retry remains usable without a
+# subscription. The helper edits only pve-enterprise.sources.
+if [[ ! -x "$DISABLE_PVE_ENTERPRISE_SOURCE" ]]; then
+  die "PVE enterprise source helper is missing or not executable: ${DISABLE_PVE_ENTERPRISE_SOURCE}."
+fi
+"$DISABLE_PVE_ENTERPRISE_SOURCE"
+
 apt-get update
 packages=(proxmox-ve postfix open-iscsi chrony ifupdown2)
 packages_missing=0
@@ -276,6 +285,8 @@ if (( packages_missing )); then
   if ! apt-get install -y "${packages[@]}"; then
     die 'package installation failed; inspect apt output and resolve the repository/dependency issue.'
   fi
+  # pve-manager may have created its enterprise source during this install.
+  "$DISABLE_PVE_ENTERPRISE_SOURCE"
 else
   log 'Proxmox VE and required service packages are already installed; skipping package installation.'
 fi
