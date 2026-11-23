@@ -79,6 +79,7 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 - SSH ログインは、インストーラの対話画面で設定する root パスワードを基本経路とします。作成するユーザーは root のみです。SSH はインストール直後から有効にする設計です。
 - 鍵ログインを選ぶ場合に限り `SSH_AUTHORIZED_KEYS_FILE` を指定します。秘密鍵は ISO に入れず、パスワードも文書・preseed に記載しません。
 - インストーラのネットワークは USB/Thunderbolt 有線 Ethernet アダプタを前提とします。Wi-Fi SSID/認証情報を preseed しません。
+- RTL8152B USB Ethernet 用の upstream `r8152` (`CONFIG_USB_RTL8152=m`) を含めます。ISO リマスターはカーネルの全 module tree を installer initrd にコピーして `depmod` を実行し、インストール先には同じ kernel package を入れます。そのため USB modalias による installer / installed system の自動ロードができます。
 - 初回起動スクリプトは有線 NIC を選び、インストーラが設定した NIC の DHCP stanza を退避したうえで `/etc/network/interfaces.d/vmbr0` に `vmbr0`（DHCP、`bridge-ports <nic>`）を作成します。有線 NIC が見つからない場合は bridge 設定をスキップするため、初回起動時に有線接続が必要です。
 - Proxmox Web UI: `https://<IP>:8006/`。ホスト名は `pve-mbp`、FQDN は `pve-mbp.local` です。名前解決は LAN の環境にも依存します。
 

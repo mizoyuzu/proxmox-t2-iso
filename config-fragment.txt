@@ -56,6 +56,10 @@ CONFIG_VXLAN=m
 CONFIG_GENEVE=m
 CONFIG_OPENVSWITCH=m
 
+# --- Wired networking: Realtek RTL8152B USB Ethernet adapter ---
+# Linux 6.18.56 Kconfig selects MII, PHYLIB, CRC32, and CRYPTO_LIB_SHA256.
+CONFIG_USB_RTL8152=m
+
 # --- nftables firewall ---
 CONFIG_NF_TABLES=y
 CONFIG_NF_TABLES_INET=y
