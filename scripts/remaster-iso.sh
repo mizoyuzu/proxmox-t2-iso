@@ -46,6 +46,10 @@ if [[ ! -f "$ROOT/scripts/first-boot-proxmox.service" ]]; then
   echo "ERROR: first-boot systemd unit is missing: $ROOT/scripts/first-boot-proxmox.service" >&2
   exit 1
 fi
+if [[ ! -f "$ROOT/scripts/partman-t2-guard.sh" ]]; then
+  echo "ERROR: partman safety guard is missing: $ROOT/scripts/partman-t2-guard.sh" >&2
+  exit 1
+fi
 
 if [[ -n "${FIRMWARE_DIR:-}" && ! -d "$FIRMWARE_DIR" ]]; then
   echo "ERROR: FIRMWARE_DIR is set but is not a directory: $FIRMWARE_DIR" >&2
@@ -100,6 +104,14 @@ if [[ ! -d "$MODULES_DIR" ]]; then
   exit 1
 fi
 echo "installer kernel: $KVER_FULL"
+# Keep the stock Debian kernel for the untouched GTK initrd, which contains
+# Debian ABI modules. GTK entries are redirected before the T2 kernel replaces
+# /install.amd/vmlinuz; text and T2-auto entries keep using the T2 kernel.
+if [[ ! -f "$TREE/install.amd/vmlinuz" ]]; then
+  echo "ERROR: source ISO is missing /install.amd/vmlinuz" >&2
+  exit 1
+fi
+cp -- "$TREE/install.amd/vmlinuz" "$TREE/install.amd/vmlinuz-debian"
 cp -- "$KVMLINUZ" "$TREE/install.amd/vmlinuz"
 
 # --- 3. initrd 再構築 ---
@@ -177,7 +189,7 @@ fi
 rm -rf -- "$PRESEED_STAGE" "$PRESEED_VERIFY_DIR"
 
 # --- 4. GRUB / isolinux: preserve normal install as the safe default ---
-# Debian 13.7.0 amd64's top-level entries start with Graphical install, Install.
+# Debian 13.8.0 amd64's top-level entries start with Graphical install, Install.
 # Put the final global settings after the source config so no later source line
 # can override them, then append the explicitly-selected automated entry.
 python3 - "$TREE/boot/grub/grub.cfg" <<'PYEOF'
@@ -260,10 +272,33 @@ def menuentries(text):
                 break
         if menuentry_depth != 0:
             raise SystemExit("ERROR: unterminated GRUB menuentry")
-        entries.append(("".join(lines[start:index]), top_level))
-    return entries
+        entries.append((start, index, "".join(lines[start:index]), top_level))
+    return lines, entries
 
-entries = menuentries(src)
+lines, entries = menuentries(src)
+rewritten = []
+cursor = 0
+gtk_rewrites = 0
+for start, end, entry, _top_level in entries:
+    rewritten.extend(lines[cursor:start])
+    if "/install.amd/gtk/initrd.gz" in entry:
+        entry, count = re.subn(
+            r"(?m)^(\s*linux\s+)/install\.amd/vmlinuz(?=\s|$)",
+            r"\g<1>/install.amd/vmlinuz-debian",
+            entry,
+        )
+        if count != 1:
+            raise SystemExit("ERROR: each stock GTK GRUB entry must have exactly one Debian kernel line")
+        gtk_rewrites += 1
+    rewritten.extend(entry.splitlines(keepends=True))
+    cursor = end
+rewritten.extend(lines[cursor:])
+src = "".join(rewritten)
+if not gtk_rewrites:
+    raise SystemExit("ERROR: Debian GRUB config has no stock GTK entries")
+open(path, "w", encoding="utf-8").write(src)
+lines, parsed_entries = menuentries(src)
+entries = [(entry, top_level) for _start, _end, entry, top_level in parsed_entries]
 marker_count = src.count("--hotkey=t")
 preseed_count = src.count("preseed/file")
 combined_count = src.count("initrd-t2auto")
@@ -278,11 +313,21 @@ if "auto=true priority=critical preseed/file=/preseed.cfg --- quiet" not in t2_e
     raise SystemExit("ERROR: T2 automated GRUB entry has incorrect boot arguments or initrd")
 
 install_entries = [entry for entry, _top_level in entries if re.search(r"(?m)^\s*menuentry\s+--hotkey=i\s+'Install'", entry)]
-if len(install_entries) != 1 or "/install.amd/initrd.gz" not in install_entries[0] or "preseed/file" in install_entries[0] or "initrd-t2auto" in install_entries[0]:
-    raise SystemExit("ERROR: stock Install GRUB entry must use only /install.amd/initrd.gz")
+if (len(install_entries) != 1 or not re.search(r"(?m)^\s*linux\s+/install\.amd/vmlinuz(?:\s|$)", install_entries[0]) or
+        "/install.amd/vmlinuz-debian" in install_entries[0] or
+        "/install.amd/initrd.gz" not in install_entries[0] or
+        "preseed/file" in install_entries[0] or "initrd-t2auto" in install_entries[0]):
+    raise SystemExit("ERROR: stock Install GRUB entry must keep the T2 kernel and main initrd")
+gtk_entries = [entry for entry, _top_level in entries if "/install.amd/gtk/initrd.gz" in entry]
+if not gtk_entries or any(
+        re.findall(r"(?m)^\s*linux\s+(\S+)", entry) != ["/install.amd/vmlinuz-debian"]
+        for entry in gtk_entries):
+    raise SystemExit("ERROR: stock GRUB GTK entries must use the preserved Debian kernel")
+if any("/install.amd/vmlinuz " not in entry for entry, _top_level in t2_entries):
+    raise SystemExit("ERROR: T2 automated GRUB entry must keep the T2 kernel")
 if not re.search(r'(?m)^set default="Install"$', src) or not re.search(r"(?m)^set timeout=30$", src):
     raise SystemExit('ERROR: GRUB default must be Install with timeout=30')
-print("grub.cfg: preseed gated to the T2 entry; stock Install/default/timeout verified")
+print(f"grub.cfg: {gtk_rewrites} GTK entries use Debian kernel; T2 Install/default/auto verified")
 PYEOF
 
 # BIOS (isolinux) fallback; deliberately leave its existing default unchanged.
@@ -290,17 +335,6 @@ if [[ ! -f "$TREE/isolinux/txt.cfg" ]]; then
   echo "ERROR: source ISO is missing /isolinux/txt.cfg" >&2
   exit 1
 fi
-python3 - "$TREE/isolinux" <<'PYEOF'
-import re
-import sys
-from pathlib import Path
-
-for path in Path(sys.argv[1]).rglob("*.cfg"):
-    src = path.read_text(encoding="utf-8")
-    updated = re.sub(r"\bvga=788\b[ \t]*", "", src)
-    if updated != src:
-        path.write_text(updated, encoding="utf-8")
-PYEOF
 cat >> "$TREE/isolinux/txt.cfg" <<'EOF'
 
 label t2auto
@@ -317,8 +351,42 @@ from pathlib import Path
 
 all_text = []
 label_bodies = []
+gtk_count = 0
 for path in sorted(Path(sys.argv[1]).rglob("*.cfg")):
-    src = path.read_text(encoding="utf-8")
+    src = re.sub(r"\bvga=788\b[ \t]*", "", path.read_text(encoding="utf-8"))
+    lines = src.splitlines(keepends=True)
+    starts = [index for index, line in enumerate(lines) if re.match(r"\s*label\s+\S+", line)]
+    updated = []
+    cursor = 0
+    for position, start in enumerate(starts):
+        end = starts[position + 1] if position + 1 < len(starts) else len(lines)
+        updated.extend(lines[cursor:start])
+        block = lines[start:end]
+        if "/install.amd/gtk/initrd.gz" in "".join(block):
+            gtk_count += 1
+            changed = 0
+            for index, line in enumerate(block):
+                line, count = re.subn(
+                    r"(?m)^(\s*kernel\s+)/install\.amd/vmlinuz(?=\s|$)",
+                    r"\g<1>/install.amd/vmlinuz-debian",
+                    line,
+                )
+                changed += count
+                if "/install.amd/gtk/initrd.gz" in line:
+                    line, count = re.subn(
+                        r"(?m)^(\s*ontimeout\s+)/install\.amd/vmlinuz(?=\s|$)",
+                        r"\g<1>/install.amd/vmlinuz-debian",
+                        line,
+                    )
+                    changed += count
+                block[index] = line
+            if not changed:
+                raise SystemExit(f"ERROR: {path}: GTK label has no kernel or ontimeout directive")
+        updated.extend(block)
+        cursor = end
+    updated.extend(lines[cursor:])
+    src = "".join(updated)
+    path.write_text(src, encoding="utf-8")
     all_text.append(src)
     current = None
     body = []
@@ -339,11 +407,26 @@ if len(t2auto_entries) != 1:
     raise SystemExit("ERROR: isolinux t2auto label is missing")
 if combined.count("preseed/file") != 1 or combined.count("initrd-t2auto") != 1:
     raise SystemExit("ERROR: isolinux must contain exactly one preseed path and combined initrd")
-if "preseed/file=/preseed.cfg" not in t2auto_entries[0] or "initrd=/install.amd/initrd-t2auto" not in t2auto_entries[0]:
-    raise SystemExit("ERROR: isolinux t2auto label has incorrect preseed or initrd")
+if ("preseed/file=/preseed.cfg" not in t2auto_entries[0] or
+        "initrd=/install.amd/initrd-t2auto" not in t2auto_entries[0] or
+        not re.search(r"(?m)^\s*kernel\s+/install\.amd/vmlinuz\s*$", t2auto_entries[0])):
+    raise SystemExit("ERROR: isolinux t2auto label must keep the T2 kernel and combined initrd")
 if any("preseed/file" in body or "initrd-t2auto" in body for name, body in label_bodies if name != "t2auto"):
     raise SystemExit("ERROR: stock isolinux labels must not use preseed or combined initrd")
-print("isolinux: preseed gated to the t2auto label")
+install_labels = [body for name, body in label_bodies if name == "install"]
+if (len(install_labels) != 1 or not re.search(r"(?m)^\s*kernel\s+/install\.amd/vmlinuz\s*$", install_labels[0]) or
+        "initrd=/install.amd/initrd.gz" not in install_labels[0]):
+    raise SystemExit("ERROR: BIOS text Install must keep the T2 kernel and main initrd")
+gtk_labels = [body for _name, body in label_bodies if "/install.amd/gtk/initrd.gz" in body]
+if not gtk_labels or any(
+        not re.findall(r"(?m)^\s*kernel\s+(\S+)", body) or
+        any(kernel != "/install.amd/vmlinuz-debian" for kernel in re.findall(r"(?m)^\s*kernel\s+(\S+)", body)) or
+        any(kernel != "/install.amd/vmlinuz-debian" for kernel in re.findall(r"(?m)^\s*ontimeout\s+(\S+)", body))
+        for body in gtk_labels):
+    raise SystemExit("ERROR: stock isolinux GTK labels must use the preserved Debian kernel")
+if "/install.amd/vmlinuz" not in t2auto_entries[0]:
+    raise SystemExit("ERROR: isolinux T2 automated entry must keep the T2 kernel")
+print(f"isolinux: {gtk_count} GTK labels use Debian kernel; T2 text/default/auto verified")
 PYEOF
 
 # --- 5. /t2 post-install payload ---
@@ -353,6 +436,8 @@ for deb in "${KERNEL_DEBS[@]}"; do
 done
 cp -- "$ROOT/scripts/first-boot-proxmox.sh" "$TREE/t2/scripts/first-boot-proxmox.sh"
 chmod 0755 "$TREE/t2/scripts/first-boot-proxmox.sh"
+cp -- "$ROOT/scripts/partman-t2-guard.sh" "$TREE/t2/scripts/partman-t2-guard.sh"
+chmod 0755 "$TREE/t2/scripts/partman-t2-guard.sh"
 cp -- "$ROOT/scripts/first-boot-proxmox.service" "$TREE/t2/systemd/first-boot-proxmox.service"
 
 if [[ -n "${FIRMWARE_DIR:-}" ]]; then

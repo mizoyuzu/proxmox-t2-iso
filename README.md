@@ -50,11 +50,13 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 
 ### preseed のディスク設計
 
-以下は確定設計です。最終リマスター ISO の CI ビルドとインストーラ完了までの VM ドライランは実施済みです。結果と未検証事項は [CI8 最終検証](docs/vm-dryrun.md#ci8-最終検証結果-2026-11-21)を参照してください。
+以下は現在の設計です。CI8 の ISO ビルドと VM ドライランはこの guard と GTK カーネルの組み合わせ修正より前に実施しました。既存領域の保持とレシピ配置の過去証跡は [CI8 最終検証](docs/vm-dryrun.md#ci8-最終検証結果-2026-11-21)、guard の block-device を使わない fixture 検証は [partman guard の説明](docs/vm-dryrun.md#partman-の対象ディスク-guard)を参照してください。これらの変更を含む ISO のビルドと VM 再検証は別途必要です。
 
 - インストール対象は `/dev/nvme0n1`、partman の選択方法は `biggest_free` です。`partman-auto/method` は設定しません。
+- Debian 13.8 の `biggest_free` は、method を設定しない構成では `partman-auto/disk` を候補絞り込みに使わず、全ディスクから最大の空き領域を選びます。T2 preseed は `partman/early_command` から `display.d/09t2guard` を入れ、書き込み前に最大領域のデバイスが GPT の `/dev/nvme0n1` であることと、`pve-final` のサイズを検証します。他のディスクや USB インストーラは接続できますが、その空き領域が最大ならインストールを停止します。
 - 新しいパーティションを空き領域に作ります。既存 ESP を再利用せず、既存の LVM/MD を削除しません。
 - レシピは新規 ESP 512 MB、`/boot` 1536 MB、swap 4096 MB、root 20480 MB ext4、残り全部を `method{ lvm }` の予約パーティションとします。
+- guard は Debian の recipe decoder で必要サイズと有限拡張を計算します。現在のレシピは `/boot` が最大 512 MB 拡張され、その後の空きが pve PV に入ります。PV 用に 32 MiB（8 extents）と最後の partition alignment 用に 4 MiB を残し、足りない場合は partman の自動処理が始まる前に戻ります。
 - Debian `expert_recipe` の MB は 10^6 bytes 単位で、parted の MiB/GiB 表示とは異なります。VM での実測表示は、レシピ 512 MB に対して 488.0 MiB、1536 MB に対して 1.4 GiB、4096 MB に対して 3.8 GiB、20480 MB に対して 19.1 GiB でした。
 - partman はこのレシピだけでは VG を作りません。`late_command` が udev の `ID_PART_ENTRY_TYPE` が `E6D6D379-F507-44C2-A23C-238F2A3DF928`（Linux LVM）の予約パーティションを特定し、`pvcreate` / `vgcreate pve` を実行します。
 - この方式では root と swap は通常パーティションであり LV ではありません。thin pool は初回起動時に VG の空き 100% から `pve/data` として作ります。

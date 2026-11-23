@@ -18,6 +18,20 @@ sudo apt-get install -y qemu-system-x86 qemu-system-gui ovmf parted gdisk xorris
 - KVM が利用できない場合、QEMU の例にある `accel=kvm` を `accel=tcg` に、`-cpu host` を `-cpu max` に変更します。TCG は低速です。
 - インストール対象 ISO は、このリポジトリの remaster workflow で生成した ISO を指定します。
 
+## partman の対象ディスク guard
+
+Debian 13.8 の `partman-auto/automatically_partition/20biggest_free/choices` は、`$DEVICES` 全体を走査して最大の free extent を返します。`partman-auto/disk=/dev/nvme0n1` は、`partman-auto/method` を設定しない `biggest_free` の選択肢を絞り込みません。そこで T2 preseed は `partman/early_command` から guard を `/lib/partman/display.d/09t2guard` に配置します。Debian の display hook 順では `09t2guard` は `10initial_auto` より先に動くため、partman が自動パーティションを作成する前に検査できます。
+
+Guard は Debian の実際の `biggest_free/choices` を呼び、選ばれた partman device が GPT の `/dev/nvme0n1` か確認します。さらに Debian の recipe decoder で `pve-final` の最低サイズと、min より大きい factor を持つ有限パーティションの拡張量を計算します。現行レシピでは `/boot` に最大 512 MB を先に割り当てます。残りの PV に 32 MiB（8 extents）と最終パーティションの alignment 用 4 MiB、合計 36 MiB を確保できない場合、guard は exit 255 で自動処理を止めます。エラーは installer log に記録され、ディスク構成を直してから再試行できます。
+
+他ディスクや USB インストーラの接続自体は許可します。Debian が `/dev/nvme0n1` 以外を最大 free extent と判断した場合は、書き込みを始める前に停止します。この guard の fixture 検証は block device を使いません:
+
+```sh
+./tests/test-partman-t2-guard.sh
+```
+
+これは partman hook の wrong-device / 容量不足時の exit 255 と、条件を満たす対象 disk の許可を確認する shell fixture です。QEMU の実際の partman ドライランは次の手順で別途実施します。
+
 ## 2. 64 GiB のテストディスクを作る
 
 以下の `DISK` は新規の一時ファイルです。実ディスクのデバイス名（例: `/dev/nvme0n1`）を絶対に指定しないでください。

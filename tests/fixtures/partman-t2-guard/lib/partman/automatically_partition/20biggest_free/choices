@@ -1,0 +1,2 @@
+#!/bin/sh
+printf '%s\t%s\n' "$PARTMAN_DEVICE_DIR//$PARTMAN_FREE_ID" 'largest free area'
