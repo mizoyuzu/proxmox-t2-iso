@@ -58,10 +58,10 @@ wait_for_network() {
 # provisioning step succeeds, so a failed rerun must not leave stale success.
 rm -f "$MARKER"
 export DEBIAN_FRONTEND=noninteractive
-wait_for_network
 
-grub_t2_default() {
-  awk '
+grub_t2_id_path() {
+  local grub_cfg=$1 running_kernel=${2:-$(uname -r)}
+  awk -v running_kernel="$running_kernel" '
     function delta(line,    i, c, quote, escaped, result) {
       quote = ""
       escaped = 0
@@ -103,6 +103,21 @@ grub_t2_default() {
       split(rest, fields, /[[:space:]]+/)
       return fields[1]
     }
+    function id_of(line,    marker, rest, quote, i, c) {
+      marker = "$menuentry_id_option"
+      i = index(line, marker)
+      if (!i) return ""
+      rest = substr(line, i + length(marker))
+      sub(/^[[:space:]]+/, "", rest)
+      quote = substr(rest, 1, 1)
+      if (quote != "\"" && quote != sprintf("%c", 39)) return ""
+      for (i = 2; i <= length(rest); i++) {
+        c = substr(rest, i, 1)
+        if (c == quote && substr(rest, i - 1, 1) != "\\")
+          return substr(rest, 2, i - 2)
+      }
+      return ""
+    }
     {
       line = $0
       sub(/^[[:space:]]+/, "", line)
@@ -122,32 +137,65 @@ grub_t2_default() {
         if (title != "") {
           if (kind == "submenu") {
             submenu_count++
-            submenu_title[submenu_count] = title
+            submenu_id[submenu_count] = id_of(line)
             submenu_depth[submenu_count] = depth
           } else {
-            entry_title = ""
-            for (i = 1; i <= submenu_count; i++) {
-              if (entry_title != "") entry_title = entry_title ">"
-              entry_title = entry_title submenu_title[i]
-            }
-            if (entry_title != "") entry_title = entry_title ">"
-            entry_title = entry_title title
+            entry_title = title
+            entry_id = id_of(line)
             menuentry_depth = depth
             in_menuentry = 1
+            menuentry_checked = 0
           }
         }
       }
 
-      if (in_menuentry && tolower(entry_title) !~ /\(recovery mode\)$/ &&
-          line ~ /^[[:space:]]*linux(efi|16|efi16)?[[:space:]]/ && tolower(line) ~ /t2-pve/) {
-        found = 1
-        print entry_title
-        exit
+      if (in_menuentry && !menuentry_checked && submenu_count > 0 &&
+          tolower(entry_title) !~ /\(recovery mode\)$/ &&
+          line ~ /^[[:space:]]*linux(efi|16|efi16)?[[:space:]]/ && tolower(line) ~ /t2-pve/ &&
+          tolower(line) !~ /[[:space:]]single([[:space:]]|$)/) {
+        menuentry_checked = 1
+        kernel_line = line
+        sub(/^[[:space:]]*linux(efi|16|efi16)?[[:space:]]+/, "", kernel_line)
+        split(kernel_line, kernel_args, /[[:space:]]+/)
+        kernel_path = kernel_args[1]
+        sub(/^.*\//, "", kernel_path)
+        if (kernel_path !~ /^vmlinuz-[^/]+$/) next
+        kernel_version = kernel_path
+        sub(/^vmlinuz-/, "", kernel_version)
+        if (kernel_version == "" || tolower(kernel_version) !~ /-t2-pve$/ ||
+            entry_id == "" || submenu_count != 1) next
+
+        # Debian 10_linux emits a version-specific advanced entry as
+        # gnulinux-${version}-advanced-${bootid} under
+        # gnulinux-advanced-${bootid}. Require this exact pairing so a
+        # generic gnulinux-simple-* ID can never silently select another
+        # kernel.
+        submenu_boot_id = submenu_id[1]
+        sub(/^gnulinux-advanced-/, "", submenu_boot_id)
+        expected_entry_id = "gnulinux-" kernel_version "-advanced-" submenu_boot_id
+        if (submenu_id[1] !~ /^gnulinux-advanced-.+/ ||
+            submenu_boot_id == "" || entry_id != expected_entry_id) next
+
+        candidate = submenu_id[1] ">" entry_id
+        if (!(candidate in matches)) {
+          matches[candidate] = kernel_version
+          match_count++
+          if (match_count == 1) first_candidate = candidate
+          # Prefer the running T2 kernel when it is represented in GRUB.
+          # Otherwise the first valid 10_linux T2 entry is the newest ordered
+          # candidate and remains a deterministic choice if several exist.
+          if (kernel_version == running_kernel && running_candidate == "")
+            running_candidate = candidate
+        }
       }
       depth += delta($0)
     }
-    END { if (!found) exit 1 }
-  ' "$1"
+    END {
+      if (match_count == 0) exit 1
+      if (running_candidate != "") print running_candidate
+      else print first_candidate
+    }
+  ' "$grub_cfg"
 }
 
 grub_default_matches() {
@@ -199,6 +247,58 @@ write_grub_defaults() {
     return 1
   fi
 }
+
+pin_t2_grub_default() {
+  local phase=$1 grub_cfg=${2:-$GRUB_CFG} defaults_file=${3:-/etc/default/grub}
+  local t2_id_path current_grub_default current_grub_timeout quoted generated_id_path
+
+  log "Pinning the version-specific T2 kernel GRUB ID ${phase}."
+  if ! update-grub; then
+    die "update-grub failed ${phase} while refreshing ${grub_cfg}."
+    return 1
+  fi
+  if [[ ! -r "$grub_cfg" ]] || ! t2_id_path=$(grub_t2_id_path "$grub_cfg"); then
+    die "no resolvable version-specific, non-recovery T2 GRUB ID path was found in ${grub_cfg} ${phase}."
+    return 1
+  fi
+
+  current_grub_default=$(sed -n 's/^GRUB_DEFAULT=//p' "$defaults_file" | head -n 1)
+  current_grub_timeout=$(sed -n 's/^GRUB_TIMEOUT=//p' "$defaults_file" | head -n 1)
+  printf -v quoted '%q' "$t2_id_path"
+  if [[ "$current_grub_default" == "$quoted" && "$current_grub_timeout" == 10 ]] &&
+     grub_default_matches "$t2_id_path" "$grub_cfg"; then
+    log "GRUB_DEFAULT already resolves to T2 ID path ${t2_id_path}."
+  else
+    if ! write_grub_defaults "$defaults_file" "$t2_id_path"; then
+      die 'could not write the stable T2 GRUB ID path and timeout settings.'
+      return 1
+    fi
+    if ! update-grub; then
+      die "update-grub failed after pinning T2 ID path ${t2_id_path}."
+      return 1
+    fi
+  fi
+
+  if ! generated_id_path=$(grub_t2_id_path "$grub_cfg"); then
+    die "regenerated ${grub_cfg} has no resolvable version-specific T2 GRUB ID path ${phase}."
+    return 1
+  fi
+  if [[ "$generated_id_path" != "$t2_id_path" ]]; then
+    die "T2 GRUB ID path changed during regeneration ${phase} (expected '${t2_id_path}', found '${generated_id_path}')."
+    return 1
+  fi
+  if ! grub_default_matches "$t2_id_path" "$grub_cfg"; then
+    grep -n 'set default=' "$grub_cfg" || true
+    die "generated ${grub_cfg} does not resolve GRUB default to T2 ID path '${t2_id_path}' ${phase}."
+    return 1
+  fi
+  log "Verified generated GRUB default and T2 ID path ${phase}: ${t2_id_path}."
+}
+
+# Pin locally before networking or APT. A rerun can repair the default even if
+# the active kernel currently lacks a working wired network driver.
+pin_t2_grub_default 'before network and APT'
+wait_for_network
 
 log 'Setting the system hostname to pve-mbp (FQDN pve-mbp.local).'
 printf 'pve-mbp\n' > /etc/hostname
@@ -319,45 +419,17 @@ else
   log 'Proxmox storage local-lvm already exists; skipping registration.'
 fi
 
-log 'Pinning GRUB to the installed T2 PVE kernel.'
-if ! update-grub; then
-  die "update-grub failed while refreshing the installed PVE menu in ${GRUB_CFG}."
-fi
-if [[ ! -r "$GRUB_CFG" ]] || ! T2_DEFAULT=$(grub_t2_default "$GRUB_CFG"); then
-  die "no GRUB menuentry with a linux line using a t2-pve kernel was found in ${GRUB_CFG}."
-fi
-# Derive the visible `Parent>Title` path from the freshly generated menu. PVE
-# may replace Debian's distributor title during package installation, so a
-# path read before update-grub can be stale even when it names the T2 kernel.
-current_grub_default=$(sed -n 's/^GRUB_DEFAULT=//p' /etc/default/grub | head -n 1)
-current_grub_timeout=$(sed -n 's/^GRUB_TIMEOUT=//p' /etc/default/grub | head -n 1)
-printf -v GRUB_DEFAULT_QUOTED '%q' "$T2_DEFAULT"
-if [[ "$current_grub_default" == "$GRUB_DEFAULT_QUOTED" && "$current_grub_timeout" == 10 ]] && grub_default_matches "$T2_DEFAULT" "$GRUB_CFG"; then
-  log "GRUB is already pinned to ${T2_DEFAULT}; skipping update-grub."
-else
-  if ! write_grub_defaults /etc/default/grub "$T2_DEFAULT"; then
-    die 'could not write the GRUB default and timeout settings.'
-  fi
-  update-grub
-fi
-if ! GENERATED_T2_DEFAULT=$(grub_t2_default "$GRUB_CFG"); then
-  die "regenerated ${GRUB_CFG} has no non-recovery T2 menuentry."
-fi
-if [[ "$GENERATED_T2_DEFAULT" != "$T2_DEFAULT" ]]; then
-  die "T2 menuentry changed after update-grub (expected '${T2_DEFAULT}', found '${GENERATED_T2_DEFAULT}')."
-fi
-if ! grub_default_matches "$T2_DEFAULT" "$GRUB_CFG"; then
-  grep -n 'set default=' "$GRUB_CFG" || true
-  die "update-grub did not generate the expected default '${T2_DEFAULT}'."
-fi
-log "Verified generated GRUB default and non-recovery T2 menuentry: ${T2_DEFAULT}."
-
 if dpkg-query -W -f='${db:Status-Status}' linux-image-amd64 2>/dev/null | grep -qx installed; then
   log 'Removing only the Debian linux-image-amd64 metapackage.'
   apt-get remove -y linux-image-amd64
 else
   log 'Debian linux-image-amd64 metapackage is absent; skipping removal.'
 fi
+
+# This final pass follows every package operation, since package hooks can
+# regenerate GRUB or install another kernel. The earlier pass already pinned
+# the T2 entry before any network or APT work, protecting an interrupted boot.
+pin_t2_grub_default 'after all package operations'
 
 configure_vmbr0() {
   local nic=$1 backup=/etc/network/interfaces.first-boot-proxmox.bak

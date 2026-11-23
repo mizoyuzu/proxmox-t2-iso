@@ -90,7 +90,7 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 
 - Proxmox VE の `pve-no-subscription` リポジトリと署名鍵を設定し、`proxmox-ve`、`postfix`、`open-iscsi`、`chrony`、`ifupdown2` を導入。`pve-manager` が作る標準の `pve-enterprise.sources` stanza は初回 apt 更新前とパッケージ導入後に無効化します。無関係な apt source と旧式の `.list` ファイルは変更しません。
 - VG `pve` の存在を必須確認し、その空き extents の 100% から thin pool `pve/data` を作成して `local-lvm` として登録。
-- インストール済み T2 カーネルを GRUB の **Parent>Title** 形式でデフォルト固定し、`GRUB_TIMEOUT=10` に設定。削除対象は Debian の `linux-image-amd64` メタパッケージのみ。
+- インストール済み T2 カーネルを GRUB のバージョン別 ID path `gnulinux-advanced-<bootid>>gnulinux-<version>-advanced-<bootid>` でデフォルト固定し、`GRUB_TIMEOUT=10` に設定します。ネットワーク/APT より前に一度固定し、全 package operation 後に再確認します。stock PVE kernel は GRUB から手動選択できます。削除対象は Debian の `linux-image-amd64` メタパッケージのみ。
 - 有線 NIC を使う `vmbr0` 設定を作成し、Proxmox 関連サービスと SSH を enable。
 
 初回起動スクリプトは自動で再起動しません。処理ログは `/var/log/first-boot-proxmox.log` に記録されます。
@@ -123,7 +123,7 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 - root と swap は LVM LV ではなく通常パーティションです。
 - 既存 ESP は再利用・変更せず、別の ESP を作る設計です。実ディスク上での共存動作は未検証です。
 - MacBookPro15,1 の T2 実機での EFI 起動、画面表示、各デバイス動作は未検証です。カーネル設定のアサートや VM 成功だけで実機動作を保証するものではありません。
-- CI10 の r3 VM では first-boot の PVE 構成、thin pool、SSH、管理 endpoint は PASS でしたが、GRUB pin は FAIL し、Boot 2 で標準 PVE kernel が選ばれました。生成済み PVE メニューから pin 先を導出する修正を追加しましたが、修正版の VM 再検証は未実施です。CI8 の新規インストール VM では OS を起動していません。実機動作も未検証です。
+- CI10 の r3 VM では first-boot の PVE 構成、thin pool、SSH、管理 endpoint は PASS でしたが、当時の title-based GRUB pin は FAIL し、Boot 2 で標準 PVE kernel が選ばれました。現在の修正は version-specific GRUB ID を使います。別の QEMU/OVMF boot smoke では Debian/PVE menu title の両方で ID path から T2 kernel `6.18.56-t2-pve` が起動し、`GRUB_DEFAULT=0` の control では PVE kernel `7.0.14-30-pve` が起動しました。この検査は GRUB/kernel 選択のみに絞っており、更新後の first-boot service 全体や full installer は再検証していません。CI8 の新規インストール VM では OS を起動していません。実機動作も未検証です。
 - 初回の Proxmox パッケージ導入にはネットワーク接続が必要です。有線 NIC が認識されない場合、`vmbr0` は作成されません。
 - 公開 CI ISO には Apple ファームウェアがありません。無線デバイスの動作を保証しません。
 - Debian の current point release が変わると、再ビルド ISO の内容やインストーラ挙動も変わる可能性があります。
@@ -136,7 +136,7 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 - オフライン検査では p1/p2 のマーカーと PARTUUID を保持し、p3 vfat、p4 ext4、p5 swap、p6 ext4、p7 LVM2_member を確認。VG `pve` は 1 PV / 0 LV、空き 33,290,190,848 bytes。T2 kernel/initrd、first-boot service、SSH 設定、locale/keyboard/timezone、hostname、および `/tmp/t2-debs` 不在も確認。`GRUB_DEFAULT=0` と T2 kernel が先頭の生成済み GRUB 項目を確認しましたが、first-boot script による GRUB pin は実行・検証していません。
 - 操作者による最初の GRUB キー入力は中断され、後の余分な tab/input で一時インストーラーメニューへ戻りましたが、インストーラを再開して完了しました。コード障害は観測されていません。
 
-検証の詳細と境界（CI10 の GRUB pin failure、修正内容、未実施の再検証、および別件の `iptables-restore` 警告）は [docs/vm-dryrun.md](docs/vm-dryrun.md#ci10-grub-pin) を参照してください。
+検証の詳細と境界（CI10 の GRUB pin failure、ID path 修正、狭い QEMU/OVMF boot smoke、および別件の `iptables-restore` 警告）は [docs/vm-dryrun.md](docs/vm-dryrun.md#ci10-grub-pin) を参照してください。
 
 ## VM での確認
 
