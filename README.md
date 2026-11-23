@@ -98,7 +98,9 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 
 ## カーネル
 
-- mainline Linux **6.18.56** に `linux-t2-patches` の **6.18** ブランチを適用します。パッチ 24 件の適用は `patch-apply-verification-6.18.56.txt` に記録されています。
+- mainline Linux **6.18.56** に `linux-t2-patches` の固定コミット **`bf06511b536a75fcea3146aa341f183c2a2daebc`** を適用します。このコミットの `version` ファイルが `KVER=6.18.56` と完全一致することを確認してからパッチを適用します。パッチ 24 件の適用は `patch-apply-verification-6.18.56.txt` に記録されています。
+- `scripts/build-kernel.sh` は kernel.org の SHA256 リストを毎回取得し、キャッシュ済み tarball も検証します。取得は一時ファイル経由で行い、パッチ適用済みかもしれない kernel 展開ツリーは再利用せず、検証済み tarball から展開し直します。
+- 意図してカーネル版を更新するときは、`KVER` と `PATCH_COMMIT` の組を確認して明示します。CLI は `KVER=6.x.y PATCH_COMMIT=<40文字のコミットSHA> ./scripts/build-kernel.sh`、Actions は `build-kernel` の `kver` / `patch_commit` inputs です。固定 SHA の `version` が KVER と一致しない場合は停止します。
 - `defconfig` と T2 側 `extra_config` に `config-fragment.txt` をマージし、`config-required.txt` の各設定をビルド前にアサートします。
 - `FB_EFI` と framebuffer/console の依存チェーン、PVE 用 nftables/ipset/bridge/cgroup 機能を設定・検査します。
 - PVE の `local-lvm` 用に `CONFIG_DM_THIN_PROVISIONING=m` (`dm-thin-pool`) と依存モジュールを含めます。パッケージリビジョン 2 はこのカーネル設定の修正です。旧 r1 は first-boot の thin pool 作成に使えません。

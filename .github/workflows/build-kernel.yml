@@ -2,8 +2,8 @@ name: build-kernel
 
 # T2 パッチ済みカーネル (方式A) を .deb 化する。
 # 実行場所は GitHub Actions (Mitaさん決定 2026-11-21)。
-# 手動実行 (workflow_dispatch) が基本。KVER とパッチブランチは t2linux の
-# version ファイルに合わせて更新すること (6.18 ブランチ = KVER 6.18.56 で検証済み)。
+# 手動実行 (workflow_dispatch) が基本。デフォルトは検証済みの固定コミットと
+# linux-t2-patches の version ファイルが一致する Linux 6.18.56 の組み合わせ。
 
 on:
   workflow_dispatch:
@@ -12,10 +12,10 @@ on:
         description: "kernel version (linux-t2-patches の version ファイルと一致させる)"
         required: true
         default: "6.18.56"
-      patch_branch:
-        description: "linux-t2-patches のブランチ"
+      patch_commit:
+        description: "linux-t2-patches の固定コミット SHA (意図的な更新時のみ変更)"
         required: true
-        default: "6.18"
+        default: "bf06511b536a75fcea3146aa341f183c2a2daebc"
       revision:
         description: "Debian package revision"
         required: true
@@ -59,7 +59,7 @@ jobs:
       - name: Build kernel .deb packages
         env:
           KVER: ${{ inputs.kver }}
-          PATCH_BRANCH: ${{ inputs.patch_branch }}
+          PATCH_COMMIT: ${{ inputs.patch_commit }}
           KDEB_REVISION: ${{ inputs.revision }}
         run: |
           chmod +x scripts/build-kernel.sh
@@ -81,7 +81,7 @@ jobs:
           name: T2 kernel ${{ inputs.kver }} for Proxmox (Debian 13)
           files: out/*.deb
           body: |
-            mainline ${{ inputs.kver }} + linux-t2-patches (${{ inputs.patch_branch }})
+            mainline ${{ inputs.kver }} + linux-t2-patches commit ${{ inputs.patch_commit }}
             Proxmox ホスト向け config (KVM/VFIO/LXC/bridge + T2 ドライバ)。
             ZFS は含まない (LVM-thin / ext4 前提)。
             Package revision: ${{ inputs.revision }}.
