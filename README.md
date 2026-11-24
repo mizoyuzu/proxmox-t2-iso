@@ -66,7 +66,7 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 インストーラの `late_command` は、設計上、次の処理を行います。
 
 1. 予約パーティションから LVM PV と VG `pve` を作成。
-2. `first-boot-proxmox.sh` と `first-boot-proxmox.service` をインストール先へ配置。
+2. first-boot、ネットワーク helper、ready 検査 unit と `pve-cluster` の hostname 同期 drop-in をインストール先へ配置。
 3. ISO 内の T2 カーネル `.deb` を in-target でインストールし、`/boot/vmlinuz-*` と initrd の存在を確認。
 4. `ssh.service` と `first-boot-proxmox.service` を enable。
 5. `/etc/ssh/sshd_config.d/10-t2.conf` に `PermitRootLogin yes` と `PasswordAuthentication yes` を設定。任意の鍵を指定した場合は `/root/.ssh/authorized_keys` に配置。
@@ -80,21 +80,27 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 - 鍵ログインを選ぶ場合に限り `SSH_AUTHORIZED_KEYS_FILE` を指定します。秘密鍵は ISO に入れず、パスワードも文書・preseed に記載しません。
 - インストーラのネットワークは USB/Thunderbolt 有線 Ethernet アダプタを前提とします。Wi-Fi SSID/認証情報を preseed しません。
 - RTL8152B USB Ethernet 用の upstream `r8152` (`CONFIG_USB_RTL8152=m`) を含めます。ISO リマスターはカーネルの全 module tree を installer initrd にコピーして `depmod` を実行し、インストール先には同じ kernel package を入れます。そのため USB modalias による installer / installed system の自動ロードができます。
-- 初回起動スクリプトは有線 NIC を選び、インストーラが設定した NIC の DHCP stanza を退避したうえで `/etc/network/interfaces.d/vmbr0` に `vmbr0`（DHCP、`bridge-ports <nic>`）を作成します。有線 NIC が見つからない場合は bridge 設定をスキップするため、初回起動時に有線接続が必要です。
-- Proxmox Web UI: `https://<IP>:8006/`。ホスト名は `pve-mbp`、FQDN は `pve-mbp.local` です。名前解決は LAN の環境にも依存します。
+- 初回起動時は IPv4 default route の device と source address から、有線 uplink を特定します。carrier の列挙順には依存せず、T2 内部 NCM 仮想 NIC も除外します。使える有線 default route がなければ first-boot は失敗を記録します。
+- Proxmox と `ifupdown2` の導入が終わったあと、`vmbr0` と `bridge-ports <nic>` を `/etc/network/interfaces` 本体へ追加します。既存の NIC DHCP stanza は `inet manual` に変えます。Proxmox の API/UI が読む main file に設定し、`ifquery -i <candidate> vmbr0` と main file の再読込を確認します。前の版が作った `interfaces.d/vmbr0` は完全一致する場合だけ main file へ移します。独自の `vmbr0` は上書きせず、内容をログに出して停止します。
+- bridge は初回起動中に live reload せず、次の reboot で有効化します。初回起動中に選んだ DHCP IP を `/etc/hosts` へ設定し、次の boot では `pve-cluster` の起動前に `vmbr0` の DHCP IPv4 lease に追随します。lease が30秒以内に来ない場合は既存の hosts mapping を保持し、PVE 起動を止めません。
+- Proxmox Web UI: `https://<現在のIP>:8006/`。IP は router DHCP lease list または console で確認してください。`pve-mbp` と `pve-mbp.local` は `/etc/hosts` 内の node 名です。ISO は mDNS/Avahi や LAN DNS を設定しないため、別 PC から `.local` が必ず解決するとは限りません。
 
 ## 初回起動の Proxmox 構成
 
-`first-boot-proxmox.service` がネットワーク起動後に `first-boot-proxmox.sh` を一度実行します。成功時に `/var/lib/first-boot-proxmox.done` marker を作り、失敗時は成功扱いにしません。初回処理にはネットワーク接続が必要です。
+`first-boot-proxmox.service` がネットワーク起動後に `first-boot-proxmox.sh` を一度実行します。`/var/lib/first-boot-proxmox.done` は初回のパッケージ構成とネットワーク設定が完了した marker です。初回スクリプトは自動再起動しません。成功時の `/var/lib/first-boot-proxmox.status` は `awaiting-reboot <boot-id>` となり、この時点では SSH/Web UI/local-lvm の稼働完了を表しません。
 
 スクリプトの処理内容:
 
 - Proxmox VE の `pve-no-subscription` リポジトリと署名鍵を設定し、`proxmox-ve`、`postfix`、`open-iscsi`、`chrony`、`ifupdown2` を導入。`pve-manager` が作る標準の `pve-enterprise.sources` stanza は初回 apt 更新前とパッケージ導入後に無効化します。無関係な apt source と旧式の `.list` ファイルは変更しません。
 - VG `pve` の存在を必須確認し、その空き extents の 100% から thin pool `pve/data` を作成して `local-lvm` として登録。
 - インストール済み T2 カーネルを GRUB のバージョン別 ID path `gnulinux-advanced-<bootid>>gnulinux-<version>-advanced-<bootid>` でデフォルト固定し、`GRUB_TIMEOUT=10` に設定します。ネットワーク/APT より前に一度固定し、全 package operation 後に再確認します。stock PVE kernel は GRUB から手動選択できます。削除対象は Debian の `linux-image-amd64` メタパッケージのみ。
-- 有線 NIC を使う `vmbr0` 設定を作成し、Proxmox 関連サービスと SSH を enable。
+- IPv4 default route に対応する有線 NIC を使う `vmbr0` 設定を `/etc/network/interfaces` に stage し、Proxmox 関連サービスと SSH を enable。
 
 初回起動スクリプトは自動で再起動しません。処理ログは `/var/log/first-boot-proxmox.log` に記録されます。
+
+次の boot では `pve-management-ready.service` が SSH、`pve-cluster`、`pvedaemon`、`pveproxy`、`pvestatd`、active な `local-lvm`、`vmbr0` の IPv4 lease と hostname 解決、loopback 上の HTTPS endpoint を確認します。成功すると status が `ready <current-boot-id> <IP>` になります。失敗時は `not-ready <current-boot-id>` を記録し 30 秒間隔で再確認します。boot ID が変われば以前の `ready` は使わず、新しい boot の状態を検査します。first-boot の apt install 中には status file がまだないため、ready unit は PVE service を起動せず apt 処理を待たせません。
+
+HTTPS readiness 検査は local endpoint の応答性を調べ、現在の DHCP IP と証明書 SAN の一致は検証しません。`pvecm updatecerts --force` は既定 node certificate を再生成してしまうため自動では呼びません。管理 UI が応答してもブラウザの証明書名警告が出る場合は、node CA と証明書設定を個別に確認してください。実行中の boot 中に DHCP lease が変わる場合、`/etc/hosts` の追随は次の boot または `pve-cluster` 再起動時です。
 
 ## カーネル
 
@@ -127,7 +133,7 @@ GitHub Actions の `build-iso` は `FIRMWARE_DIR` 未設定で実行され、フ
 - 既存 ESP は再利用・変更せず、別の ESP を作る設計です。実ディスク上での共存動作は未検証です。
 - MacBookPro15,1 の T2 実機での EFI 起動、画面表示、各デバイス動作は未検証です。カーネル設定のアサートや VM 成功だけで実機動作を保証するものではありません。
 - CI10 の r3 VM では first-boot の PVE 構成、thin pool、SSH、管理 endpoint は PASS でしたが、当時の title-based GRUB pin は FAIL し、Boot 2 で標準 PVE kernel が選ばれました。現在の修正は version-specific GRUB ID を使います。別の QEMU/OVMF boot smoke では Debian/PVE menu title の両方で ID path から T2 kernel `6.18.56-t2-pve` が起動し、`GRUB_DEFAULT=0` の control では PVE kernel `7.0.14-30-pve` が起動しました。この検査は GRUB/kernel 選択のみに絞っており、更新後の first-boot service 全体や full installer は再検証していません。CI8 の新規インストール VM では OS を起動していません。実機動作も未検証です。
-- 初回の Proxmox パッケージ導入にはネットワーク接続が必要です。有線 NIC が認識されない場合、`vmbr0` は作成されません。
+- 初回の Proxmox パッケージ導入にはネットワーク接続が必要です。有線 IPv4 default route が見つからない場合は first-boot が明示的に失敗し、`/var/log/first-boot-proxmox.log` に理由を記録します。
 - 公開 CI ISO には Apple ファームウェアがありません。無線デバイスの動作を保証しません。
 - Debian の current point release が変わると、再ビルド ISO の内容やインストーラ挙動も変わる可能性があります。
 

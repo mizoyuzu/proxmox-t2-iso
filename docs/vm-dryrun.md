@@ -247,3 +247,35 @@ r3 kernel/script の VM 検証では first-boot provisioning（`pve-cluster`、t
 shell 回帰テストは古い Debian title default と PVE title の異なる menu を fixture にし、ID path への移行、複数 T2 version の選択、および title 変更後も同じ ID が解決することを確認します。合成 OVMF 検査では実際の GRUB 2.12 が Debian と Proxmox の異なる menu title で version-specific T2 ID を選ぶことを確認しました。続く QEMU/OVMF boot smoke では実 kernel binary を使い、Debian と PVE の menu title のどちらでも同じ ID path が `6.18.56-t2-pve` を起動し、`GRUB_DEFAULT=0` の control が `7.0.14-30-pve` を起動することを確認しました。これは GRUB の ID 解決と kernel 選択を検証する狭い boot test であり、full installer や更新後の first-boot service 全体の再検証ではありません。CI8 の full installer VM は引き続き installed OS を起動していません。今回の検査に実機または実ディスクは使用していません。同じ CI10 証跡には `pve-firewall: iptables-restore: unable to initialize table 'raw'` も記録されていますが、これは別の kernel 設定課題であり、今回変更していません。
 
 証跡 bundle: `r4-firstboot-evidence/CI10-FIRSTBOOT-REPORT.txt`、`offline-boot1-grub-menu.txt`、`grub-after-boot1.cfg` / `grub-boot1-final.cfg`。
+
+## vmbr0 と管理 readiness の確認
+
+first-boot は Proxmox/`ifupdown2` の導入後に `/etc/network/interfaces` へ `vmbr0` を書き、live network reload は行いません。`/var/lib/first-boot-proxmox.done` は設定 stage 完了を示します。`/var/lib/first-boot-proxmox.status` が `awaiting-reboot <boot-id>` の間は、まだ bridge と管理 service の readiness を確認していません。
+
+VM では first-boot が終わった状態で一度停止し、インストール済み OS を次に起動して次を確認します。
+
+```sh
+cat /var/lib/first-boot-proxmox.status
+grep -nE '^(auto vmbr0|iface vmbr0|    bridge-ports)' /etc/network/interfaces
+ifquery vmbr0
+ifquery --list | grep -Fx vmbr0
+```
+
+設定確認後に guest を reboot します。次の boot で `pve-management-ready.service` が管理機能を確認します。
+
+```sh
+systemctl status pve-management-ready.service
+cat /var/lib/first-boot-proxmox.status
+ip -4 -o addr show dev vmbr0 scope global
+ip -4 route get 1.1.1.1
+getent ahostsv4 pve-mbp
+systemctl is-active ssh pve-cluster pvedaemon pveproxy pvestatd
+pvesm status
+curl -kfsS -o /dev/null https://127.0.0.1:8006/
+```
+
+期待する status は `ready <この boot の ID> <vmbr0 IPv4>` です。ready unit は active な `local-lvm` と HTTPS endpoint も確認し、後続 boot では以前の status を再利用しません。失敗すると `not-ready <current-boot-id>` を記録して30秒後に再確認します。service log は `journalctl -u pve-management-ready.service`、hosts 同期は `journalctl -u pve-cluster.service` で調べます。`pve-cluster` 起動前の lease 同期待ちは最大30秒で、timeout しても以前の hosts mapping を保持して cluster start を続けます。
+
+HTTPS の検査は local endpoint の到達性を確認します。`curl -k` は現在の IP と TLS certificate SAN の一致を確かめません。`pvecm updatecerts --force` は既定 node cert を強制再生成するため自動実行しません。独自 certificate を残したまま IP identity を更新する必要がある場合は、PVE certificate 設定を別途確認してください。ホスト名変更後は `sync-pve-mbp-hosts.sh` が旧 `pve-mbp` mapping を変更しません。実行中の boot 中に DHCP lease が更新された場合は、次回 `pve-cluster` 起動時または reboot 時に hosts を同期します。
+
+このネットワーク更新を guest で検証するときは、`tests/test-pve-management-network.sh` の host-side test だけで完了扱いにせず、VM の first-boot/reboot を行い、上記の status と bridge/endpoint を記録してください。

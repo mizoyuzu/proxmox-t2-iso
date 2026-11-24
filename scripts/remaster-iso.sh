@@ -50,6 +50,17 @@ if [[ ! -f "$ROOT/scripts/first-boot-proxmox.service" ]]; then
   echo "ERROR: first-boot systemd unit is missing: $ROOT/scripts/first-boot-proxmox.service" >&2
   exit 1
 fi
+for required_file in \
+  scripts/configure-pve-network.sh \
+  scripts/sync-pve-mbp-hosts.sh \
+  scripts/verify-pve-management-ready.sh \
+  scripts/pve-management-ready.service \
+  scripts/pve-cluster-hosts-sync.conf; do
+  if [[ ! -f "$ROOT/$required_file" ]]; then
+    echo "ERROR: management network payload is missing: $ROOT/$required_file" >&2
+    exit 1
+  fi
+done
 if [[ ! -f "$ROOT/scripts/partman-t2-guard.sh" ]]; then
   echo "ERROR: partman safety guard is missing: $ROOT/scripts/partman-t2-guard.sh" >&2
   exit 1
@@ -442,9 +453,15 @@ cp -- "$ROOT/scripts/first-boot-proxmox.sh" "$TREE/t2/scripts/first-boot-proxmox
 chmod 0755 "$TREE/t2/scripts/first-boot-proxmox.sh"
 cp -- "$ROOT/scripts/disable-pve-enterprise-source.sh" "$TREE/t2/scripts/disable-pve-enterprise-source.sh"
 chmod 0755 "$TREE/t2/scripts/disable-pve-enterprise-source.sh"
+for helper in configure-pve-network.sh sync-pve-mbp-hosts.sh verify-pve-management-ready.sh; do
+  cp -- "$ROOT/scripts/$helper" "$TREE/t2/scripts/$helper"
+  chmod 0755 "$TREE/t2/scripts/$helper"
+done
 cp -- "$ROOT/scripts/partman-t2-guard.sh" "$TREE/t2/scripts/partman-t2-guard.sh"
 chmod 0755 "$TREE/t2/scripts/partman-t2-guard.sh"
 cp -- "$ROOT/scripts/first-boot-proxmox.service" "$TREE/t2/systemd/first-boot-proxmox.service"
+cp -- "$ROOT/scripts/pve-management-ready.service" "$TREE/t2/systemd/pve-management-ready.service"
+cp -- "$ROOT/scripts/pve-cluster-hosts-sync.conf" "$TREE/t2/systemd/pve-cluster-hosts-sync.conf"
 
 if [[ -n "${FIRMWARE_DIR:-}" ]]; then
   mkdir -p "$TREE/t2/firmware/brcm"

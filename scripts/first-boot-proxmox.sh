@@ -6,6 +6,8 @@ readonly MARKER=/var/lib/first-boot-proxmox.done
 readonly LOG_FILE=/var/log/first-boot-proxmox.log
 readonly GRUB_CFG=/boot/grub/grub.cfg
 readonly DISABLE_PVE_ENTERPRISE_SOURCE=/usr/local/sbin/disable-pve-enterprise-source.sh
+readonly CONFIGURE_PVE_NETWORK=/usr/local/sbin/configure-pve-network.sh
+readonly SYNC_PVE_HOSTS=/usr/local/sbin/sync-pve-mbp-hosts.sh
 
 if [[ $(id -u) -ne 0 ]]; then
   printf 'ERROR: run this script as root.\n' >&2
@@ -56,7 +58,7 @@ wait_for_network() {
 
 # A manual rerun is a fresh attempt. The marker is committed only after every
 # provisioning step succeeds, so a failed rerun must not leave stale success.
-rm -f "$MARKER"
+rm -f "$MARKER" /var/lib/first-boot-proxmox.status /var/lib/first-boot-proxmox.staged-boot-id
 export DEBIAN_FRONTEND=noninteractive
 
 grub_t2_id_path() {
@@ -303,27 +305,21 @@ wait_for_network
 log 'Setting the system hostname to pve-mbp (FQDN pve-mbp.local).'
 printf 'pve-mbp\n' > /etc/hostname
 hostname pve-mbp
+if [[ ! -x "$CONFIGURE_PVE_NETWORK" ]]; then
+  die "wired vmbr0 configuration helper is missing or not executable: ${CONFIGURE_PVE_NETWORK}."
+fi
+network_choice=$("$CONFIGURE_PVE_NETWORK" --route-only)
+read -r selected_nic IP_ADDR <<< "$network_choice"
+if [[ -z "${selected_nic:-}" || -z "${IP_ADDR:-}" ]]; then
+  die 'wired vmbr0 helper did not return a selected interface and IPv4 source address.'
+fi
+log "Resolved the wired uplink ${selected_nic} and current DHCP source address ${IP_ADDR}."
 SHORT_HOSTNAME=$(hostname -s)
 FQDN="${SHORT_HOSTNAME}.local"
-IP_ADDR=$(ip -o -4 addr show scope global 2>/dev/null | awk 'NR == 1 { sub(/\/.*/, "", $4); print $4; exit }')
-if [[ -n "$IP_ADDR" ]]; then
-  hosts_tmp=$(mktemp /etc/hosts.XXXXXX)
-  awk '
-    {
-      output = $1
-      for (i = 2; i <= NF; i++)
-        if ($i != "pve-mbp" && $i != "pve-mbp.local") output = output " " $i
-      if (output != "") print output
-    }
-  ' /etc/hosts > "$hosts_tmp"
-  chmod --reference=/etc/hosts "$hosts_tmp"
-  chown --reference=/etc/hosts "$hosts_tmp"
-  mv "$hosts_tmp" /etc/hosts
-  printf '%s %s %s\n' "$IP_ADDR" "$FQDN" "$SHORT_HOSTNAME" >> /etc/hosts
-  log "/etc/hosts maps ${IP_ADDR} to ${FQDN} and ${SHORT_HOSTNAME}."
-else
-  log 'WARNING: no global IPv4 address yet; cannot map pve-mbp.local to a real IP. Continuing.'
+if [[ ! -x "$SYNC_PVE_HOSTS" ]]; then
+  die "management hostname synchronization helper is missing or not executable: ${SYNC_PVE_HOSTS}."
 fi
+"$SYNC_PVE_HOSTS" "$IP_ADDR"
 
 log 'Configuring the Proxmox VE Trixie no-subscription repository.'
 install -d -m 0755 /usr/share/keyrings
@@ -430,110 +426,27 @@ fi
 # regenerate GRUB or install another kernel. The earlier pass already pinned
 # the T2 entry before any network or APT work, protecting an interrupted boot.
 pin_t2_grub_default 'after all package operations'
-
-configure_vmbr0() {
-  local nic=$1 backup=/etc/network/interfaces.first-boot-proxmox.bak
-  local config_tmp desired interfaces_file=/etc/network/interfaces
-
-  if [[ ! -f "$interfaces_file" ]]; then
-    die '/etc/network/interfaces is missing; cannot safely configure vmbr0.'
-  fi
-  if [[ ! -e "$backup" ]]; then
-    cp -a "$interfaces_file" "$backup"
-    log "Backed up ${interfaces_file} to ${backup}."
-  fi
-
-  config_tmp=$(mktemp /etc/network/interfaces.XXXXXX)
-  awk -v nic="$nic" '
-    function comment_line(line) { print "# first-boot-proxmox: " line }
-    {
-      if (in_dhcp_stanza && $0 !~ /^[[:space:]]/ && $0 !~ /^[[:space:]]*$/ && $0 !~ /^#/) in_dhcp_stanza = 0
-      if (in_dhcp_stanza) {
-        comment_line($0)
-        next
-      }
-      if ($1 == "auto" || $1 == "allow-hotplug") {
-        output = $1
-        removed = 0
-        for (i = 2; i <= NF; i++) {
-          if ($i == nic) removed = 1
-          else output = output " " $i
-        }
-        if (removed) {
-          if (output == $1) comment_line($0)
-          else print output
-          next
-        }
-      }
-      if ($1 == "iface" && $2 == nic && $3 == "inet" && $4 == "dhcp") {
-        in_dhcp_stanza = 1
-        comment_line($0)
-        next
-      }
-      print
-    }
-  ' "$interfaces_file" > "$config_tmp"
-  if ! cmp -s "$config_tmp" "$interfaces_file"; then
-    chmod --reference="$interfaces_file" "$config_tmp"
-    chown --reference="$interfaces_file" "$config_tmp"
-    mv "$config_tmp" "$interfaces_file"
-    log "Moved the installer's DHCP configuration for ${nic} out of the active interfaces file."
-  else
-    rm -f "$config_tmp"
-  fi
-
-  if ! grep -Eq '^[[:space:]]*source(-directory)?[[:space:]]+/etc/network/interfaces\.d' "$interfaces_file"; then
-    printf '\n# Load first-boot bridge configuration.\nsource /etc/network/interfaces.d/*\n' >> "$interfaces_file"
-  fi
-  install -d -m 0755 /etc/network/interfaces.d
-  desired=$(printf 'auto vmbr0\niface vmbr0 inet dhcp\n    bridge-ports %s\n    bridge-stp off\n    bridge-fd 0' "$nic")
-  if [[ ! -f /etc/network/interfaces.d/vmbr0 ]] || [[ $(cat /etc/network/interfaces.d/vmbr0) != "$desired" ]]; then
-    printf '%s\n' "$desired" > /etc/network/interfaces.d/vmbr0
-  else
-    log "vmbr0 configuration for ${nic} already exists; leaving it unchanged."
-  fi
-  if ! ifquery vmbr0; then
-    die 'ifquery vmbr0 rejected the generated configuration; inspect /etc/network/interfaces and interfaces.d/vmbr0.'
-  fi
-  log "Validated vmbr0 bridge configuration using wired NIC ${nic}. It will activate at the next reboot; no live reload was run."
-}
-
-log 'Looking for a wired Ethernet interface for vmbr0.'
-shopt -s nullglob
-wired_nics=()
-for nic_path in /sys/class/net/en* /sys/class/net/eth*; do
-  nic=${nic_path##*/}
-  case "$nic" in
-    lo|wl*|vmbr*|veth*|tap*|br*|docker*|t2bce*) continue ;;
-  esac
-  [[ -d "/sys/class/net/${nic}/device" ]] || continue
-  wired_nics+=("$nic")
-done
-shopt -u nullglob
-selected_nic=''
-for nic in "${wired_nics[@]}"; do
-  if [[ -r "/sys/class/net/${nic}/carrier" ]] && read -r carrier < "/sys/class/net/${nic}/carrier" && [[ "$carrier" == 1 ]]; then
-    selected_nic=$nic
-    break
-  fi
-done
-if [[ -z "$selected_nic" && ${#wired_nics[@]} -gt 0 ]]; then
-  selected_nic=${wired_nics[0]}
+log 'Staging PVE-managed vmbr0 after the networking packages are installed.'
+network_choice=$("$CONFIGURE_PVE_NETWORK")
+read -r selected_nic staged_route_ip <<< "$network_choice"
+if [[ -z "${selected_nic:-}" || -z "${staged_route_ip:-}" ]]; then
+  die 'wired vmbr0 helper did not return a selected interface and IPv4 source address.'
 fi
-if [[ -n "$selected_nic" ]]; then
-  configure_vmbr0 "$selected_nic"
-else
-  log 'WARNING: no wired Ethernet NIC (en*/eth*) with a device path was found; skipping vmbr0 configuration.'
+if [[ "$staged_route_ip" != "$IP_ADDR" ]]; then
+  log "The routed IPv4 changed during provisioning from ${IP_ADDR} to ${staged_route_ip}; synchronizing /etc/hosts."
+  IP_ADDR=$staged_route_ip
+  "$SYNC_PVE_HOSTS" "$IP_ADDR"
 fi
 
 log 'Enabling SSH and Proxmox management services.'
 systemctl enable ssh
 systemctl enable pve-cluster pvedaemon pveproxy pvestatd
 
-if [[ -n "$IP_ADDR" ]]; then
-  log "Proxmox Web UI: https://${IP_ADDR}:8006/"
-else
-  log "Proxmox Web UI: https://${FQDN}:8006/ (resolve pve-mbp.local to the host's LAN address)."
-fi
-log 'Provisioning complete. A reboot is required to boot the T2 kernel; this script will not reboot automatically.'
+log "Proxmox Web UI after reboot: https://${IP_ADDR}:8006/ (use the current DHCP address shown by the router or console)."
+current_boot_id=$(cat /proc/sys/kernel/random/boot_id)
+printf '%s\n' "$current_boot_id" > /var/lib/first-boot-proxmox.staged-boot-id.tmp
+mv -f /var/lib/first-boot-proxmox.staged-boot-id.tmp /var/lib/first-boot-proxmox.staged-boot-id
+printf 'awaiting-reboot %s\n' "$current_boot_id" > /var/lib/first-boot-proxmox.status.tmp
+mv -f /var/lib/first-boot-proxmox.status.tmp /var/lib/first-boot-proxmox.status
+log 'Provisioning configuration is staged; a reboot is required for vmbr0. Management readiness will be checked after that reboot.'
 touch "$MARKER"

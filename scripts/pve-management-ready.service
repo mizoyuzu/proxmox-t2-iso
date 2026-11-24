@@ -1,0 +1,18 @@
+[Unit]
+Description=Verify first-boot Proxmox management readiness
+After=network-online.target ssh.service pve-cluster.service pvedaemon.service pveproxy.service pvestatd.service
+Wants=network-online.target
+ConditionPathExists=/var/lib/first-boot-proxmox.done
+ConditionPathExists=/var/lib/first-boot-proxmox.status
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/verify-pve-management-ready.sh
+Restart=on-failure
+RestartSec=30s
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
