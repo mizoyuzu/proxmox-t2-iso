@@ -107,7 +107,7 @@ wget --quiet https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixi
   --output-document=/usr/share/keyrings/proxmox-archive-keyring.gpg
 apt-get update
 apt-get install -y --no-install-recommends \
-  asciidoc-base automake bc bison bindgen cpio debhelper dh-python file flex \
+  asciidoc-base automake bc bison bindgen build-essential cpio debhelper dh-python file flex \
   gcc git gawk kmod libdw-dev libelf-dev libiberty-dev libnuma-dev libpve-common-perl \
   libslang2-dev libssl-dev libtool lintian lz4 dwarves perl-modules python3-dev \
   rsync rustc rust-src rustfmt rust-clippy sed sphinx-common tar xmlto zlib1g-dev zstd
