@@ -47,10 +47,8 @@ jobs:
           [[ "$T2_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$REVISION" =~ ^[1-9][0-9]*$ ]]
 
-      - name: Run offline kernel package tests
-        run: |
-          bash tests/test-build-kernel-inputs.sh
-          bash tests/test-pve-kernel-config.sh
+      - name: Run offline tests
+        run: bash tests/run-all.sh
 
       - name: Build and verify kernel .deb packages
         env:
