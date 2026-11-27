@@ -17,9 +17,14 @@ make_package() {
   local case_name="$1"
   local package_name="$2"
   local variant="$3"
+  local module_layout="${4:-usr}"
   local root="$fixture/$case_name/root"
   local deb="$fixture/$case_name/proxmox-kernel-7.0.14-30-pve-t2_7.0.14-30_amd64.deb"
-  mkdir -p "$root/DEBIAN" "$root/boot" "$root/lib/modules/7.0.14-30-pve-t2/kernel/fixture"
+  local modules_root="$root/usr/lib/modules/7.0.14-30-pve-t2"
+  if [[ "$module_layout" == legacy ]]; then
+    modules_root="$root/lib/modules/7.0.14-30-pve-t2"
+  fi
+  mkdir -p "$root/DEBIAN" "$root/boot" "$modules_root/kernel/fixture"
   cat > "$root/DEBIAN/control" <<CONTROL
 Package: $package_name
 Version: 7.0.14-30
@@ -49,7 +54,7 @@ CONTROL
     if [[ "$variant" == "missing-module" && "$module" == zfs.ko ]]; then
       continue
     fi
-    : > "$root/lib/modules/7.0.14-30-pve-t2/kernel/fixture/$module"
+    : > "$modules_root/kernel/fixture/$module"
   done
 
   mkdir -p "$(dirname -- "$deb")"
@@ -74,6 +79,9 @@ expect_failure() {
 
 valid_deb="$(make_package valid proxmox-kernel-7.0.14-30-pve-t2 valid)"
 "$verifier" "$valid_deb"
+
+legacy_deb="$(make_package legacy proxmox-kernel-7.0.14-30-pve-t2 valid legacy)"
+"$verifier" "$legacy_deb"
 
 missing_config_deb="$(make_package missing-config proxmox-kernel-7.0.14-30-pve-t2 missing-config)"
 expect_failure "$missing_config_deb" "CONFIG_KVM is not enabled"
