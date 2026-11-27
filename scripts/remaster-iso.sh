@@ -34,6 +34,18 @@ if [[ ! -d "$KERNEL_DEB_DIR" ]]; then
   echo "ERROR: kernel deb directory does not exist: $KERNEL_DEB_DIR" >&2
   exit 1
 fi
+
+prepare_kernel_modules_path() {
+  local kernel_extract=$1 kver=$2
+  local usr_modules_dir="$kernel_extract/usr/lib/modules/$kver"
+  local compat_modules_path="$kernel_extract/lib/modules"
+
+  if [[ -d "$usr_modules_dir" && ! -e "$compat_modules_path" && ! -L "$compat_modules_path" ]]; then
+    mkdir -p "$kernel_extract/lib"
+    ln -s ../usr/lib/modules "$compat_modules_path"
+  fi
+}
+
 if [[ ! -f "$ROOT/preseed.cfg" ]]; then
   echo "ERROR: preseed file is missing: $ROOT/preseed.cfg" >&2
   exit 1
@@ -122,9 +134,10 @@ fi
 KVMLINUZ="${KERNEL_IMAGES[0]}"
 KVER_FULL="$(basename "$KVMLINUZ" | sed 's/^vmlinuz-//')"
 EXPECTED_PVE_KVER="${T2_EXPECTED_PVE_KVER:-7.0.14-30-pve-t2}"
+prepare_kernel_modules_path "$KEX" "$KVER_FULL"
 MODULES_DIR="$KEX/lib/modules/$KVER_FULL"
 if [[ ! -d "$MODULES_DIR" ]]; then
-  echo "ERROR: kernel modules are missing from selected image deb: $MODULES_DIR" >&2
+  echo "ERROR: kernel modules are missing from selected image deb; checked legacy layout $KEX/lib/modules/$KVER_FULL and usrmerge layout $KEX/usr/lib/modules/$KVER_FULL" >&2
   exit 1
 fi
 if [[ "$KERNEL_DEB_PACKAGE" == proxmox-kernel-* ]]; then
