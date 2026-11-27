@@ -544,6 +544,8 @@ for helper in configure-pve-network.sh sync-pve-mbp-hosts.sh verify-pve-manageme
 done
 cp -- "$ROOT/scripts/partman-t2-guard.sh" "$TREE/t2/scripts/partman-t2-guard.sh"
 chmod 0755 "$TREE/t2/scripts/partman-t2-guard.sh"
+cp -- "$ROOT/scripts/t2-hardware-preflight.sh" "$TREE/t2/scripts/t2-hardware-preflight.sh"
+chmod 0755 "$TREE/t2/scripts/t2-hardware-preflight.sh"
 cp -- "$ROOT/scripts/first-boot-proxmox.service" "$TREE/t2/systemd/first-boot-proxmox.service"
 cp -- "$ROOT/scripts/pve-management-ready.service" "$TREE/t2/systemd/pve-management-ready.service"
 cp -- "$ROOT/scripts/pve-cluster-hosts-sync.conf" "$TREE/t2/systemd/pve-cluster-hosts-sync.conf"
