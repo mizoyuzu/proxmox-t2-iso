@@ -9,16 +9,29 @@ mkdir -p "$BIN"
 
 cat > "$BIN/mountpoint" <<'EOF'
 #!/bin/sh
-mount_path=$2
-[ "${T2_TEST_MISSING_MOUNT:-}" != "$mount_path" ] || exit 1
-case "$mount_path" in
-  "$T2_TARGET_ROOT"|"$T2_TARGET_ROOT/boot"|"$T2_TARGET_ROOT/boot/efi") exit 0 ;;
-  *) exit 1 ;;
-esac
+echo 'unexpected mountpoint invocation' >&2
+exit 99
 EOF
 cat > "$BIN/wipefs" <<'EOF'
 #!/bin/sh
-printf '%s\n' "${T2_TEST_WIPED_SIGS:-}"
+echo 'unexpected wipefs invocation' >&2
+exit 99
+EOF
+cat > "$BIN/blkid" <<'EOF'
+#!/bin/sh
+if [ "$#" -ne 6 ] || [ "$1" != '-p' ] || [ "$2" != '-o' ] || [ "$3" != 'value' ] ||
+   [ "$4" != '-s' ] || [ "$5" != 'TYPE' ]; then
+  echo "unexpected blkid probe: $*" >&2
+  exit 99
+fi
+if [ -n "${T2_TEST_BLKID_EXIT:-}" ]; then
+  exit "$T2_TEST_BLKID_EXIT"
+fi
+if [ -n "${T2_TEST_DISK_SIGNATURE:-}" ]; then
+  printf '%s\n' "$T2_TEST_DISK_SIGNATURE"
+  exit 0
+fi
+exit 2
 EOF
 cat > "$BIN/vgs" <<'EOF'
 #!/bin/sh
@@ -68,6 +81,8 @@ make_case() {
   printf 'UUID=root / ext4 defaults 0 1\nUUID=boot /boot ext4 defaults 0 2\nUUID=efi /boot/efi vfat defaults 0 2\nUUID=swap none swap sw 0 0\n' > "$case_root/target/etc/fstab"
   printf 'GRUB_DEFAULT=0\nGRUB_CMDLINE_LINUX_DEFAULT="quiet"\n' > "$case_root/target/etc/default/grub"
   printf 't2bce_core\n' > "$case_root/target/etc/initramfs-tools/modules"
+  printf '/dev/test-root %s ext4 rw 0 0\n/dev/test-boot %s ext4 rw 0 0\n' \
+    "$case_root/target" "$case_root/target/boot" > "$case_root/proc-mounts"
   touch "$case_root/cdrom/t2/debs/proxmox-kernel-7.0.14-30-pve-t2_7.0.14-30_amd64.deb"
   for script in first-boot-proxmox.sh configure-pve-network.sh sync-pve-mbp-hosts.sh \
     verify-pve-management-ready.sh disable-pve-enterprise-source.sh; do
@@ -132,17 +147,35 @@ grep -q 'expected exactly one unused LVM reservation' "$WORK/auto-ambiguous/targ
 
 make_case auto-signed
 cp "$WORK/auto-valid/udev/b259:0:9" "$WORK/auto-signed/udev/b259:0:9"
-if run_setup "$WORK/auto-signed" auto T2_TEST_WIPED_SIGS=ext4 >/dev/null 2>&1; then
+if run_setup "$WORK/auto-signed" auto T2_TEST_DISK_SIGNATURE=ext4 >/dev/null 2>&1; then
   echo 'FAIL: auto mode accepted an LVM reservation with a filesystem signature' >&2
   exit 1
 fi
 ! grep -q '^pvcreate\|^vgcreate' "$WORK/auto-signed/commands.log"
+
+make_case auto-blkid-error
+cp "$WORK/auto-valid/udev/b259:0:9" "$WORK/auto-blkid-error/udev/b259:0:9"
+if run_setup "$WORK/auto-blkid-error" auto T2_TEST_BLKID_EXIT=4 >/dev/null 2>&1; then
+  echo 'FAIL: auto mode ignored an unexpected blkid probe failure' >&2
+  exit 1
+fi
+! grep -q '^pvcreate\|^vgcreate' "$WORK/auto-blkid-error/commands.log"
 
 # Manual layout accepts an existing pve VG only with no thin pool and free extents.
 make_case manual-existing-vg
 run_setup "$WORK/manual-existing-vg" manual T2_TEST_VG_PRESENT=1 T2_TEST_FREE_EXTENTS=16
 ! grep -q '^vgcreate' "$WORK/manual-existing-vg/commands.log"
 assert_common_setup "$WORK/manual-existing-vg"
+
+# Apple partman-efi may leave the ESP unmounted; only root and /boot are required.
+make_case manual-efi-not-mounted
+run_setup "$WORK/manual-efi-not-mounted" manual T2_TEST_VG_PRESENT=1 T2_TEST_FREE_EXTENTS=16
+if awk -v wanted="$WORK/manual-efi-not-mounted/target/boot/efi" '$2 == wanted { found=1 } END { exit !found }' \
+  "$WORK/manual-efi-not-mounted/proc-mounts"; then
+  echo 'FAIL: ESP fixture unexpectedly contains a /target/boot/efi mount' >&2
+  exit 1
+fi
+assert_common_setup "$WORK/manual-efi-not-mounted"
 
 make_case manual-existing-thinpool
 if run_setup "$WORK/manual-existing-thinpool" manual T2_TEST_VG_PRESENT=1 T2_TEST_LV_PRESENT=1 >/dev/null 2>&1; then
@@ -160,7 +193,7 @@ fi
 
 # If pve is absent, exactly one unassigned LVM PV is enough to create it.
 make_case manual-one-pv
-run_setup "$WORK/manual-one-pv" manual T2_TEST_UNASSIGNED_PVS='/dev/fakepv |' T2_TEST_WIPED_SIGS=LVM2_member
+run_setup "$WORK/manual-one-pv" manual T2_TEST_UNASSIGNED_PVS='/dev/fakepv |' T2_TEST_DISK_SIGNATURE=LVM2_member
 grep -Fq 'vgcreate pve /dev/fakepv' "$WORK/manual-one-pv/commands.log"
 assert_common_setup "$WORK/manual-one-pv"
 
@@ -169,7 +202,7 @@ make_case manual-legacy-kernel
 rm -f "$WORK/manual-legacy-kernel/cdrom/t2/debs"/*.deb
 touch "$WORK/manual-legacy-kernel/cdrom/t2/debs/linux-image-6.18.56-t2-pve_6.18.56_amd64.deb"
 run_setup "$WORK/manual-legacy-kernel" manual T2_TEST_UNASSIGNED_PVS='/dev/fakepv |' \
-  T2_TEST_WIPED_SIGS=LVM2_member T2_TEST_INSTALLED_KERNELS=6.18.56-t2-pve
+  T2_TEST_DISK_SIGNATURE=LVM2_member T2_TEST_INSTALLED_KERNELS=6.18.56-t2-pve
 grep -Fq 'update-initramfs -u -k 6.18.56-t2-pve' "$WORK/manual-legacy-kernel/commands.log"
 grep -q 'Validated installed T2 kernel 6.18.56-t2-pve and matching initrd' \
   "$WORK/manual-legacy-kernel/target/var/log/t2-target-setup.log"
@@ -195,17 +228,22 @@ fi
 ! grep -q '^vgcreate' "$WORK/manual-many-pv/commands.log"
 
 make_case manual-fs-signature
-if run_setup "$WORK/manual-fs-signature" manual T2_TEST_UNASSIGNED_PVS='/dev/fakepv |' T2_TEST_WIPED_SIGS=ext4 >/dev/null 2>&1; then
+if run_setup "$WORK/manual-fs-signature" manual T2_TEST_UNASSIGNED_PVS='/dev/fakepv |' T2_TEST_DISK_SIGNATURE=ext4 >/dev/null 2>&1; then
   echo 'FAIL: manual mode accepted a filesystem signature on its candidate PV' >&2
   exit 1
 fi
 ! grep -q '^vgcreate' "$WORK/manual-fs-signature/commands.log"
 
 make_case manual-bad-layout
-if run_setup "$WORK/manual-bad-layout" manual T2_TEST_MISSING_MOUNT="$WORK/manual-bad-layout/target/boot/efi" >/dev/null 2>&1; then
-  echo 'FAIL: manual mode accepted a target without /boot/efi mounted' >&2
+awk -v wanted="$WORK/manual-bad-layout/target/boot" '$2 != wanted' \
+  "$WORK/manual-bad-layout/proc-mounts" > "$WORK/manual-bad-layout/proc-mounts.no-boot"
+if run_setup "$WORK/manual-bad-layout" manual \
+  T2_PROC_MOUNTS="$WORK/manual-bad-layout/proc-mounts.no-boot" >/dev/null 2>&1; then
+  echo 'FAIL: manual mode accepted a target without /target/boot mounted' >&2
   exit 1
 fi
 ! grep -q '^vgcreate' "$WORK/manual-bad-layout/commands.log"
+grep -q 'required target mount is missing: .*/target/boot' \
+  "$WORK/manual-bad-layout/target/var/log/t2-target-setup.log"
 
 printf 'PASS: target setup validates auto/manual LVM and mounts, installs the T2 kernel, and stages first-boot configuration.\n'
