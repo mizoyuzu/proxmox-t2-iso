@@ -127,9 +127,8 @@ shopt -u nullglob
   fail "expected exactly one proxmox-kernel-*-pve-t2 image package, found ${#image_packages[@]}"
 
 cp -- "${packages[@]}" "$ARTIFACT_STAGE/"
-"$SCRIPT_DIR/verify-pve-kernel.sh" "$ARTIFACT_STAGE/$(basename -- "${image_packages[0]}")"
-
 mkdir -p -- "$OUT_DIR"
 cp -f -- "$ARTIFACT_STAGE"/*.deb "$OUT_DIR/"
+"$SCRIPT_DIR/verify-pve-kernel.sh" "$ARTIFACT_STAGE/$(basename -- "${image_packages[0]}")"
 echo "=== PVE T2 kernel packages ==="
 ls -lh -- "$OUT_DIR"/*.deb
