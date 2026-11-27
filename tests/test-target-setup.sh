@@ -52,8 +52,9 @@ set -euo pipefail
 printf 'in-target %s\n' "$*" >> "$T2_TEST_COMMAND_LOG"
 if [[ ${1:-} == sh && ${2:-} == -c ]]; then
   mkdir -p "$T2_TARGET_ROOT/boot"
-  touch "$T2_TARGET_ROOT/boot/vmlinuz-7.0.14-30-pve-t2" \
-    "$T2_TARGET_ROOT/boot/initrd.img-7.0.14-30-pve-t2"
+  for version in ${T2_TEST_INSTALLED_KERNELS:-7.0.14-30-pve-t2}; do
+    touch "$T2_TARGET_ROOT/boot/vmlinuz-$version" "$T2_TARGET_ROOT/boot/initrd.img-$version"
+  done
 fi
 EOF
 chmod 0755 "$BIN"/*
@@ -162,6 +163,28 @@ make_case manual-one-pv
 run_setup "$WORK/manual-one-pv" manual T2_TEST_UNASSIGNED_PVS='/dev/fakepv |' T2_TEST_WIPED_SIGS=LVM2_member
 grep -Fq 'vgcreate pve /dev/fakepv' "$WORK/manual-one-pv/commands.log"
 assert_common_setup "$WORK/manual-one-pv"
+
+# The legacy linux-image fallback installs the former -t2-pve suffix.
+make_case manual-legacy-kernel
+rm -f "$WORK/manual-legacy-kernel/cdrom/t2/debs"/*.deb
+touch "$WORK/manual-legacy-kernel/cdrom/t2/debs/linux-image-6.18.56-t2-pve_6.18.56_amd64.deb"
+run_setup "$WORK/manual-legacy-kernel" manual T2_TEST_UNASSIGNED_PVS='/dev/fakepv |' \
+  T2_TEST_WIPED_SIGS=LVM2_member T2_TEST_INSTALLED_KERNELS=6.18.56-t2-pve
+grep -Fq 'update-initramfs -u -k 6.18.56-t2-pve' "$WORK/manual-legacy-kernel/commands.log"
+grep -q 'Validated installed T2 kernel 6.18.56-t2-pve and matching initrd' \
+  "$WORK/manual-legacy-kernel/target/var/log/t2-target-setup.log"
+assert_common_setup "$WORK/manual-legacy-kernel"
+
+# Never guess when more than one supported T2 kernel is present.
+make_case manual-multiple-kernels
+if run_setup "$WORK/manual-multiple-kernels" manual T2_TEST_VG_PRESENT=1 \
+  T2_TEST_INSTALLED_KERNELS='7.0.14-30-pve-t2 6.18.56-t2-pve' >/dev/null 2>&1; then
+  echo 'FAIL: manual mode accepted multiple installed T2 kernels' >&2
+  exit 1
+fi
+grep -q 'expected exactly one T2 kernel image.*found 2' \
+  "$WORK/manual-multiple-kernels/target/var/log/t2-target-setup.log"
+! grep -q '^vgcreate' "$WORK/manual-multiple-kernels/commands.log"
 
 # Do not use multiple unassigned PVs or overwrite a filesystem signature.
 make_case manual-many-pv

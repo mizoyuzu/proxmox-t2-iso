@@ -150,12 +150,26 @@ cp -- "$1" "$STAGING_DIR/"
 log "Installing kernel package ${1##*/}."
 "$IN_TARGET" sh -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/t2-debs/*.deb'
 
-kernel_images="$TARGET"/boot/vmlinuz-*-pve-t2
-set -- $kernel_images
-[ -f "$1" ] || fail 'installed kernel vmlinuz-*-pve-t2 is missing.'
-[ "$#" -eq 1 ] || fail "expected exactly one T2 kernel image, found $# ($kernel_images)."
-KVER=${1##*/vmlinuz-}
-[ -f "$TARGET/boot/initrd.img-$KVER" ] || fail "matching initrd is missing: /boot/initrd.img-$KVER"
+kernel_count=0
+KERNEL_IMAGE=
+for kernel_image in "$TARGET"/boot/vmlinuz-*-pve-t2 "$TARGET"/boot/vmlinuz-*-t2-pve; do
+  [ -f "$kernel_image" ] || continue
+  kernel_count=$((kernel_count + 1))
+  KERNEL_IMAGE=$kernel_image
+done
+[ "$kernel_count" -eq 1 ] || fail "expected exactly one T2 kernel image (-pve-t2 or legacy -t2-pve), found $kernel_count."
+KVER=${KERNEL_IMAGE##*/vmlinuz-}
+
+initrd_count=0
+INITRD_IMAGE=
+for initrd_image in "$TARGET"/boot/initrd.img-*-pve-t2 "$TARGET"/boot/initrd.img-*-t2-pve; do
+  [ -f "$initrd_image" ] || continue
+  initrd_count=$((initrd_count + 1))
+  INITRD_IMAGE=$initrd_image
+done
+[ "$initrd_count" -eq 1 ] || fail "expected exactly one T2 initrd (-pve-t2 or legacy -t2-pve), found $initrd_count."
+[ "$INITRD_IMAGE" = "$TARGET/boot/initrd.img-$KVER" ] ||
+  fail "T2 kernel/initrd versions do not match: $KVER and ${INITRD_IMAGE##*/initrd.img-}."
 log "Validated installed T2 kernel $KVER and matching initrd."
 
 MODULES_FILE="$TARGET/etc/initramfs-tools/modules"
