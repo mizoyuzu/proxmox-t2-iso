@@ -3,14 +3,14 @@
 MacBookPro15,1 (T2) 向け Proxmox VE インストール用、カスタムカーネル付き
 Debian 13 リマスターISO のビルドリポジトリ。
 
-## エージェント体制 (所有者指定, 2026-11-21 最終形)
+## エージェント体制 (所有者指定, 2026-11-27 更新)
 
 - **オーケストレーションは Qoder CLI / DeepSeek-Flash (reasoning effort = Max)**
   が担う。設計判断、タスク分解、ワーカーの起ち上げと監視、レビュー、最終確認は
   すべて Qoder の仕事。
 - **実作業ワーカーは Qoder 自身が T3 Code のスレッド機能で生やす**:
   プロバイダ opencode、モデル exedev-gpt/gpt-6-luna (exe.dev Gateway,
-  Responses API)、reasoning = high。プロジェクトの opencode.json で
+  Responses API)、reasoning = xhigh。プロジェクトの opencode.json で
   build エージェントのデフォルトをこの構成にしてある。
   ワーカーごとに作業ブランチ + ワークツリーを割り当てること。
 - 司令 (タスクの起点) は所有者/アシスタントから Qoder スレッドへ投げられる。

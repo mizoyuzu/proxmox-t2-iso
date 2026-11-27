@@ -1,0 +1,37 @@
+From 509913736eeb37e5abc481bc2113a5e28b419da9 Mon Sep 17 00:00:00 2001
+From: Kenan Kasumovic <kenan@kasumovic.ch>
+Date: Mon, 11 May 2026 10:29:19 +0200
+Subject: [PATCH] Add T2 support for pve-t2 kernel
+
+---
+ Makefile                         |  2 +-
+ debian/rules.d/config-amd64.opts | 14 ++++++++++++++
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/Makefile b/Makefile
+index 6815089..2b5caea 100644
+--- a/Makefile
++++ b/Makefile
+@@ -21,3 +21,3 @@
+ DEB_VERSION=$(KERNEL_VER)-$(KREL)$(PKG_REV_EXTRA)
+-EXTRAVERSION=-$(KREL)$(KREL_EXTRA)-pve
++EXTRAVERSION=-$(KREL)$(KREL_EXTRA)-pve-t2
+ KVNAME=$(KERNEL_VER)$(EXTRAVERSION)
+diff --git a/debian/rules.d/config-amd64.opts b/debian/rules.d/config-amd64.opts
+--- a/debian/rules.d/config-amd64.opts
++++ b/debian/rules.d/config-amd64.opts
+@@ -9,0 +10,14 @@
++m CONFIG_T2BCE_CORE
++m CONFIG_T2BCE_VHCI
++m CONFIG_T2BCE_AUDIO
++m CONFIG_T2BCE_DMA
++m CONFIG_T2BCE_AVE
++m CONFIG_APPLE_GMUX
++m CONFIG_HID_APPLETB_BL
++m CONFIG_HID_APPLETB_KBD
++m CONFIG_HID_MAGICMOUSE
++m CONFIG_DRM_APPLETBDRM
++m CONFIG_BT_HCIBCM4377
++m CONFIG_SENSORS_APPLESMC
++m CONFIG_APFS_FS
++e CONFIG_STAGING
