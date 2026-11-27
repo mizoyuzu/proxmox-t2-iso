@@ -1,1 +1,1 @@
-{"$schema":"https://opencode.ai/config.json","agent":{"build":{"description":"Implementation worker for proxmox-t2-iso: GPT-6 Luna (exe.dev Gateway, Responses API) with high reasoning, per owner directive 2026-11-21.","model":"exedev-gpt/gpt-6-luna","variant":"high"}}}
+{"$schema":"https://opencode.ai/config.json","agent":{"build":{"description":"Implementation worker for proxmox-t2-iso: GPT-6 Luna (exe.dev Gateway, Responses API) with xhigh reasoning, per owner directive 2026-11-27.","model":"exedev-gpt/gpt-6-luna","variant":"xhigh"}}}
