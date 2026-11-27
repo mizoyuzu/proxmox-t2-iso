@@ -279,3 +279,94 @@ curl -kfsS -o /dev/null https://127.0.0.1:8006/
 HTTPS の検査は local endpoint の到達性を確認します。`curl -k` は現在の IP と TLS certificate SAN の一致を確かめません。`pvecm updatecerts --force` は既定 node cert を強制再生成するため自動実行しません。独自 certificate を残したまま IP identity を更新する必要がある場合は、PVE certificate 設定を別途確認してください。ホスト名変更後は `sync-pve-mbp-hosts.sh` が旧 `pve-mbp` mapping を変更しません。実行中の boot 中に DHCP lease が更新された場合は、次回 `pve-cluster` 起動時または reboot 時に hosts を同期します。
 
 このネットワーク更新を guest で検証するときは、`tests/test-pve-management-network.sh` の host-side test だけで完了扱いにせず、VM の first-boot/reboot を行い、上記の status と bridge/endpoint を記録してください。
+
+## 案B: PVE T2 kernel の自動インストール / 手動パーティション検証
+
+以下は `*-pve-t2` kernel と自動・手動の2つの T2 インストール項目を持つ ISO 用です。上記の CI8/CI10 記録は旧 `*-t2-pve` kernel の履歴として残してあります。実機・実ディスクでは実行せず、必ず使い捨て VM ディスクを使ってください。
+
+### 自動インストール harness
+
+必要なツールは QEMU x86_64、OVMF、`sgdisk`、`losetup`、`partprobe`、`mkfs.fat`、`mkfs.ext4`、`sudo`、SSH client、`curl` です。harness は新しい `/tmp/pve-t2-auto.*` 内の raw image だけを対象にし、block device を指定する引数はありません。既定では KVM を使います。KVM が使えない場合は `--accel tcg` を指定してください。
+
+```sh
+ISO=/path/to/debian-13-t2-proxmox.iso
+WORKDIR=/tmp/pve-t2-auto-plan-b
+
+# Boot 0: 64 GiB GPT image を作成。p1=既存 ESP 200 MiB、p2=既存 Linux 8 GiB。
+# 両方に DRYRUN marker を作成し、残りを自動インストールの空き領域にする。
+tests/vm/pve-t2-auto.sh install --iso "$ISO" --workdir "$WORKDIR" --accel kvm
+```
+
+GRUB では通常の stock `Install` を既定のままにし、自動項目の hotkey `t` を明示的に押します。root password は installer に対話入力し、記録しないでください。インストール完了後は、インストーラが再起動を要求した時点で VM を power off し、ISO から再度起動しない状態にします。続いて以下を実行します。
+
+```sh
+# Boot 1: first-boot-proxmox の完了と awaiting-reboot status を SSH 経由で確認。
+tests/vm/pve-t2-auto.sh boot1 --workdir "$WORKDIR" --accel kvm
+
+# Boot 1 の guest を停止した後の Boot 2: kernel / T2BCE / ZFS / PVE services /
+# vmbr0 / SSH / Web UI / pvesm を確認。
+tests/vm/pve-t2-auto.sh boot2 --workdir "$WORKDIR" --accel kvm
+
+# QEMU monitor 経由で ACPI powerdown を送る。
+tests/vm/pve-t2-auto.sh stop --workdir "$WORKDIR"
+```
+
+`boot1` と `boot2` は GTK の QEMU window を起動し、host の `127.0.0.1:22222` と `:28006` に SSH/Web UI を forward します。別用途でポートが使われている場合は `--ssh-port` / `--web-port` を変更してください。SSH password は端末の prompt にのみ入力し、スクリプト・環境変数・ログへ保存しません。Boot 2 のスクリプトは guest 内で `uname -r`、`lsmod` (`t2bce_core` / `t2bce_vhci`)、`modinfo zfs`、`ssh` / PVE services、`vmbr0` の global IPv4、HTTPS/8006、`pvesm status` の `local-lvm` active を検査します。加えて host 側から forward された Web UI に接続します。
+
+自動項目の完了後、作成済み raw image を読み取り専用で調べ、p1/p2 の marker が残り、既存 PARTUUID が変化していないことも記録してください。harness が失敗した場合は VM の GTK console、first-boot log、`pve-management-ready.service` の journal を確認します。T2 hardware がない VM では一部の Apple 固有モジュールのロード可否が実機と異なる場合があり、その差分を記録して、VM の成功を実機動作の証明とは扱わないでください。
+
+### 手動パーティションモード (partman UI は人手で1回)
+
+手動 UI は自動化せず、使い捨ての 64 GiB GPT image を使って人手で1回確認します。自動モード用 image と混ぜず、別の workdir を使います。既存 §2 の `truncate` / `sgdisk` / marker 手順で `DISK="$WORKDIR/disk.raw"` を作り、p1=200 MiB FAT32 ESP、p2=8 GiB ext4 Linux を既存領域として作って両方に marker を置きます。次の起動例で `WORKDIR` は `/tmp/pve-t2-auto.*` 以下にしてください。これは QEMU harness の post-install boot1/boot2 検査を手動インストール後にも再利用するための名前です。
+
+```sh
+ISO=/path/to/debian-13-t2-proxmox.iso
+WORKDIR=/tmp/pve-t2-auto-manual
+DISK="$WORKDIR/disk.raw"
+OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+OVMF_VARS_TEMPLATE=/usr/share/OVMF/OVMF_VARS_4M.fd
+OVMF_VARS="$WORKDIR/OVMF_VARS.fd"
+mkdir -p "$WORKDIR"
+cp -- "$OVMF_VARS_TEMPLATE" "$OVMF_VARS"
+
+# §2 の作成コマンドを DISK に対して実行し、64 GiB GPT + p1/p2 marker を用意。
+# その後、手動 UI 用に QEMU を起動:
+qemu-system-x86_64 \
+  -machine q35,accel=kvm -cpu host -m 8G -smp 4 \
+  -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
+  -drive if=pflash,format=raw,file="$OVMF_VARS" \
+  -drive if=none,id=installcd,file="$ISO",media=cdrom,readonly=on \
+  -device ide-cd,drive=installcd \
+  -drive if=none,id=t2disk,file="$DISK",format=raw \
+  -device nvme,drive=t2disk,serial=T2MANUAL0001 \
+  -netdev user,id=net0 -device e1000,netdev=net0 \
+  -boot order=d,menu=on -display gtk -serial mon:stdio
+```
+
+1. GRUB の stock `Install` が既定であることを確認し、手動 T2 entry の hotkey `m` を押す。locale/network は preseed、root password は対話入力する。
+2. Debian Installer の Partition disks で **Manual** を選び、p1/p2 を変更せず、64 GiB disk の空き領域に次の構成を作る。既存 macOS/APFS/Ubuntu 領域を消す操作はしない。
+
+   | 用途 | サイズ | 種類 / mountpoint |
+   | --- | ---: | --- |
+   | 既存 p1 | 200 MiB | FAT32 ESP。変更しない |
+   | 既存 p2 | 8 GiB | ext4。変更しない |
+   | 新 ESP | 512 MiB | EFI System Partition、`/boot/efi` |
+   | `/boot` | 2 GiB | ext4、`/boot` |
+   | swap | 4 GiB | swap area |
+   | `/` | 24–32 GiB | ext4、`/` |
+   | LVM PV | 残り | physical volume for LVM。VG `pve`、初期 LV は作らない |
+
+3. LVM configuration で VG `pve` を作成する。partman の summary で p1/p2 が保持され、新規 ESP/boot/swap/root/PV だけが空き領域内にあることを確認してから変更を書き込む。
+4. installer の late_command が `t2-target-setup.sh manual` を実行する。これは手動 UI で作成・mount 済みの `/target` に対する検証なので、installer を完了させて一度だけ実行する。終了後は VM の `/target/var/log/t2-target-setup.log` に manual mode と成功結果が記録されていることを確認する。スクリプトを host 上で直接実行したり、実ディスクを `/target` に mount したりしない。別途 unit test を実行する場合は `tests/test-target-setup.sh` を使い、QEMU で作った disposable target 以外を渡さない。
+5. インストール終了後、reboot 前に VM を power off する。手動 target に対する Boot 1 / Boot 2 は auto harness の検査モードを再利用できる。
+
+   ```sh
+   tests/vm/pve-t2-auto.sh boot1 --workdir "$WORKDIR" --accel kvm
+   tests/vm/pve-t2-auto.sh stop --workdir "$WORKDIR"
+   tests/vm/pve-t2-auto.sh boot2 --workdir "$WORKDIR" --accel kvm
+   tests/vm/pve-t2-auto.sh stop --workdir "$WORKDIR"
+   ```
+
+   Boot 1 で first-boot 完了を確認し、graceful shutdown 後の Boot 2 で kernel / service / network / Web UI / `pvesm` を確認する。最後に p1/p2 の marker と PARTUUID が前後で同じことを確認する。
+
+**保存するスクリーンショット**: (a) GRUB menu (stock default と auto/manual の識別が読める状態)、(b) partman の全 partition summary (p1/p2 と新規領域が同時に見える状態)、(c) 新 ESP、`/boot`、root、swap、LVM PV の詳細/mountpoint 画面、(d) 「Write the changes to disks?」確認画面と直前の layout、(e) late_command 後の installer completion。root password、SSH password、秘密情報が画面や端末に写らないようにし、パスワード入力画面は撮影しない。スクリーンショットとログには ISO SHA-256、commit、VM disk layout、実施日を添えて evidence として保管する。
