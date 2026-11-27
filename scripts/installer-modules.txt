@@ -49,6 +49,8 @@ cdc_ether
 cdc_ncm
 thunderbolt_net
 tg3
+e1000
+e1000e
 
 # Crypto used by storage/filesystems
 crc32c
