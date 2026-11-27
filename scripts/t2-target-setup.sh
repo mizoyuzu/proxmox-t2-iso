@@ -23,7 +23,7 @@ exec >>"$LOG_FILE" 2>&1
 log() { printf '[t2-target-setup:%s] %s\n' "$MODE" "$*"; }
 fail() { log "ERROR: $*"; exit 1; }
 
-for required_tool in mountpoint awk wipefs vgs pvs lvs pvcreate vgcreate; do
+for required_tool in awk blkid vgs pvs lvs pvcreate vgcreate; do
   command -v "$required_tool" >/dev/null 2>&1 || fail "required installer command is missing: $required_tool"
 done
 command -v "$IN_TARGET" >/dev/null 2>&1 || fail "in-target command is missing: $IN_TARGET"
@@ -43,8 +43,11 @@ assert_not_mounted() {
 }
 
 target_layout_check() {
-  for mount_path in "$TARGET" "$TARGET/boot" "$TARGET/boot/efi"; do
-    mountpoint -q "$mount_path" || fail "required target mount is missing: $mount_path"
+  [ -r "$PROC_MOUNTS" ] || fail "installer mount table is missing: $PROC_MOUNTS"
+  for mount_path in "$TARGET" "$TARGET/boot"; do
+    if ! awk -v wanted="$mount_path" '$2 == wanted { found=1 } END { exit !found }' "$PROC_MOUNTS"; then
+      fail "required target mount is missing: $mount_path"
+    fi
   done
   [ -r "$TARGET/etc/fstab" ] || fail 'target /etc/fstab is missing.'
   awk '$0 !~ /^[[:space:]]*#/ && NF >= 3 && $3 == "swap" { found=1 } END { exit !found }' "$TARGET/etc/fstab" ||
@@ -83,9 +86,12 @@ create_auto_vg() {
   pv=$1
   is_block_device "$pv" || fail "$pv is not a block device."
   assert_not_mounted "$pv"
-  raw_signatures=$(wipefs -n --noheadings -o TYPE "$pv" 2>/dev/null) || fail "could not safely inspect signatures on $pv."
-  signatures=$(printf '%s\n' "$raw_signatures" | awk 'NF { print $1 }')
-  [ -z "$signatures" ] || fail "filesystem or PV signature ($signatures) found on $pv; refusing to overwrite it."
+  if signature_type=$(blkid -p -o value -s TYPE "$pv" 2>/dev/null); then
+    fail "filesystem or PV signature (${signature_type:-unknown}) found on $pv; refusing to overwrite it."
+  else
+    signature_status=$?
+    [ "$signature_status" -eq 2 ] || fail "could not safely inspect signatures on $pv (blkid exit=$signature_status)."
+  fi
   all_vgs=$(vgs --noheadings -o vg_name 2>/dev/null) || fail 'could not safely inspect existing volume groups.'
   if printf '%s\n' "$all_vgs" | awk '$1 == "pve" { found=1 } END { exit !found }'; then
     fail 'VG pve already exists; refusing to reuse it in automatic mode.'
@@ -119,12 +125,15 @@ create_or_check_manual_vg() {
   pv=$1
   is_block_device "$pv" || fail "$pv is not a block device."
   assert_not_mounted "$pv"
-  raw_signatures=$(wipefs -n --noheadings -o TYPE "$pv" 2>/dev/null) || fail "could not safely inspect signatures on PV $pv."
-  signatures=$(printf '%s\n' "$raw_signatures" | awk 'NF { print $1 }')
-  case "$signatures" in
-    ''|LVM2_member) ;;
-    *) fail "filesystem signature ($signatures) found on PV $pv; refusing to modify it." ;;
-  esac
+  if signature_type=$(blkid -p -o value -s TYPE "$pv" 2>/dev/null); then
+    case "$signature_type" in
+      LVM2_member) ;;
+      *) fail "filesystem signature (${signature_type:-unknown}) found on PV $pv; refusing to modify it." ;;
+    esac
+  else
+    signature_status=$?
+    [ "$signature_status" -eq 2 ] || fail "could not safely inspect signatures on PV $pv (blkid exit=$signature_status)."
+  fi
   log "Creating VG pve on the single unassigned PV $pv."
   vgcreate pve "$pv"
 }
