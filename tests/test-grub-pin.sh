@@ -12,8 +12,8 @@ eval "$(sed -n '/^grub_t2_id_path() {/,/^}/p' "$SCRIPT")"
 eval "$(sed -n '/^grub_default_matches() {/,/^}/p' "$SCRIPT")"
 eval "$(sed -n '/^write_grub_defaults() {/,/^}/p' "$SCRIPT")"
 
-expected_latest='gnulinux-advanced-fixture-root>gnulinux-6.18.60-t2-pve-advanced-fixture-root'
-expected_running='gnulinux-advanced-fixture-root>gnulinux-6.18.56-t2-pve-advanced-fixture-root'
+expected_latest='gnulinux-advanced-fixture-root>gnulinux-7.0.14-30-pve-t2-advanced-fixture-root'
+expected_running='gnulinux-advanced-fixture-root>gnulinux-7.0.13-29-pve-t2-advanced-fixture-root'
 actual=$(grub_t2_id_path "$FIXTURE" 7.0.14-30-pve)
 [[ "$actual" == "$expected_latest" ]] || {
   printf 'FAIL: expected first ordered T2 GRUB ID path %q, got %q\n' "$expected_latest" "$actual" >&2
@@ -22,9 +22,29 @@ actual=$(grub_t2_id_path "$FIXTURE" 7.0.14-30-pve)
 
 # Multiple T2 kernels are valid. Keep the running T2 version when it is
 # present; a stock running kernel falls back to the first (newest ordered) T2.
-actual_running=$(grub_t2_id_path "$FIXTURE" 6.18.56-t2-pve)
+actual_running=$(grub_t2_id_path "$FIXTURE" 7.0.13-29-pve-t2)
 [[ "$actual_running" == "$expected_running" ]] || {
   printf 'FAIL: expected the running T2 GRUB ID path %q, got %q\n' "$expected_running" "$actual_running" >&2
+  exit 1
+}
+
+# Keep compatibility with the former -t2-pve release suffix as well.
+legacy_suffix="$TMPDIR/grub-legacy-t2-suffix.cfg"
+cat > "$legacy_suffix" <<'EOF'
+if [ "${feature_menuentry_id}" = y ]; then
+  set menuentry_id_option="--id"
+else
+  set menuentry_id_option=""
+fi
+submenu 'Advanced options' $menuentry_id_option 'gnulinux-advanced-fixture-root' {
+  menuentry 'Linux 6.18.56-t2-pve' $menuentry_id_option 'gnulinux-6.18.56-t2-pve-advanced-fixture-root' {
+    linux /vmlinuz-6.18.56-t2-pve root=UUID=test ro quiet
+  }
+}
+EOF
+legacy_expected='gnulinux-advanced-fixture-root>gnulinux-6.18.56-t2-pve-advanced-fixture-root'
+[[ $(grub_t2_id_path "$legacy_suffix" 6.18.56-t2-pve) == "$legacy_expected" ]] || {
+  printf 'FAIL: legacy -t2-pve GRUB suffix was not recognized.\n' >&2
   exit 1
 }
 
@@ -100,4 +120,4 @@ grep -q "'gnulinux-simple-fixture-root'" "$generated" || {
   exit 1
 }
 
-printf 'PASS: GRUB selects a version-specific T2 ID, handles multiple installed versions and title migration, and keeps stock entries.\n'
+printf 'PASS: GRUB selects version-specific -pve-t2 IDs, accepts legacy -t2-pve, handles multiple kernels, and keeps stock entries.\n'

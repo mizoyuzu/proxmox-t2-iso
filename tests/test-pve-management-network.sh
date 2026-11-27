@@ -140,11 +140,40 @@ printf '#!/usr/bin/env bash\n[[ $1 == is-active && $2 == --quiet ]] && exit 0\ne
 printf '#!/usr/bin/env bash\nprintf "Name Type Status Total Used Available\\nlocal-lvm lvmthin active 100 1 99\\n"\n' > "$BIN/pvesm"
 printf '#!/usr/bin/env bash\n[[ " $* " == *" https://127.0.0.1:8006/ "* ]] && [[ " $* " == *" --insecure "* ]]\n' > "$BIN/curl"
 printf '#!/usr/bin/env bash\nprintf "192.0.2.99 STREAM pve-mbp\\n"\n' > "$BIN/getent"
-chmod 0755 "$BIN/systemctl" "$BIN/pvesm" "$BIN/curl" "$BIN/getent"
+printf '#!/usr/bin/env bash\n[[ $1 == -r ]] || exit 2\nprintf "%%s\\n" "${PVE_TEST_KERNEL:-7.0.14-30-pve-t2}"\n' > "$BIN/uname"
+cat > "$BIN/lsmod" <<'EOF'
+#!/usr/bin/env bash
+printf 'Module Size Used by\n'
+if [[ ${PVE_TEST_MISSING_CORE:-0} != 1 ]]; then printf 't2bce_core 123 0\n'; fi
+if [[ ${PVE_TEST_MISSING_VHCI:-0} != 1 ]]; then printf 't2bce_vhci 123 0\n'; fi
+EOF
+cat > "$BIN/modinfo" <<'EOF'
+#!/usr/bin/env bash
+[[ ${1:-} == zfs && ${PVE_TEST_NO_ZFS:-0} != 1 ]]
+EOF
+chmod 0755 "$BIN/systemctl" "$BIN/pvesm" "$BIN/curl" "$BIN/getent" "$BIN/uname" "$BIN/lsmod" "$BIN/modinfo"
 env PATH="$BIN:$PATH" PVE_MANAGEMENT_TEST_ROOT="$TEST_ROOT/routed" PVE_IP_BIN="$BIN/ip" \
   PVE_SYSTEMCTL_BIN="$BIN/systemctl" PVE_STORAGE_BIN="$BIN/pvesm" PVE_CURL_BIN="$BIN/curl" PVE_GETENT_BIN="$BIN/getent" \
+  PVE_UNAME_BIN="$BIN/uname" PVE_LSMOD_BIN="$BIN/lsmod" PVE_MODINFO_BIN="$BIN/modinfo" \
   PVE_TEST_ROUTE_DEV=vmbr0 PVE_TEST_ROUTE_IP=192.0.2.99 "$ROOT/scripts/verify-pve-management-ready.sh" >/dev/null
 grep -Fxq 'ready new-boot 192.0.2.99' "$TEST_ROOT/routed/var/lib/first-boot-proxmox.status"
+
+run_readiness_failure() {
+  local boot=$1
+  shift
+  printf '%s\n' "$boot" > "$TEST_ROOT/routed/proc/sys/kernel/random/boot_id"
+  if env PATH="$BIN:$PATH" PVE_MANAGEMENT_TEST_ROOT="$TEST_ROOT/routed" PVE_IP_BIN="$BIN/ip" \
+    PVE_SYSTEMCTL_BIN="$BIN/systemctl" PVE_STORAGE_BIN="$BIN/pvesm" PVE_CURL_BIN="$BIN/curl" PVE_GETENT_BIN="$BIN/getent" \
+    PVE_UNAME_BIN="$BIN/uname" PVE_LSMOD_BIN="$BIN/lsmod" PVE_MODINFO_BIN="$BIN/modinfo" \
+    PVE_TEST_ROUTE_DEV=vmbr0 PVE_TEST_ROUTE_IP=192.0.2.99 "$@" "$ROOT/scripts/verify-pve-management-ready.sh" >/dev/null 2>&1; then
+    printf 'FAIL: readiness accepted an invalid T2 kernel/module state (%s).\n' "$boot" >&2
+    exit 1
+  fi
+  grep -Fxq "not-ready $boot" "$TEST_ROOT/routed/var/lib/first-boot-proxmox.status"
+}
+run_readiness_failure wrong-kernel PVE_TEST_KERNEL=7.0.14-30-pve
+run_readiness_failure missing-vhci PVE_TEST_MISSING_VHCI=1
+run_readiness_failure missing-zfs PVE_TEST_NO_ZFS=1
 
 # A later boot without vmbr0 must replace the old ready result with its failure.
 printf 'later-boot\n' > "$TEST_ROOT/routed/proc/sys/kernel/random/boot_id"

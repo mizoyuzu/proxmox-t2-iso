@@ -12,6 +12,9 @@ readonly CURL_BIN=${PVE_CURL_BIN:-curl}
 readonly SYSTEMCTL_BIN=${PVE_SYSTEMCTL_BIN:-systemctl}
 readonly STORAGE_BIN=${PVE_STORAGE_BIN:-pvesm}
 readonly GETENT_BIN=${PVE_GETENT_BIN:-getent}
+readonly UNAME_BIN=${PVE_UNAME_BIN:-uname}
+readonly LSMOD_BIN=${PVE_LSMOD_BIN:-lsmod}
+readonly MODINFO_BIN=${PVE_MODINFO_BIN:-modinfo}
 
 log() { printf '[verify-pve-management-ready] %s\n' "$*"; }
 fail() {
@@ -41,7 +44,7 @@ route_ip() {
 }
 
 main() {
-  local boot_id staged_boot current_status ip_addr status_tmp configured_hostname
+  local boot_id staged_boot current_status ip_addr status_tmp configured_hostname running_kernel
   if [[ -n $ROOT ]]; then
     boot_id=$(cat "${ROOT}/proc/sys/kernel/random/boot_id")
   else
@@ -68,6 +71,17 @@ main() {
   printf 'checking %s\n' "$boot_id" > "${STATUS_FILE}.tmp"
   mv -f -- "${STATUS_FILE}.tmp" "$STATUS_FILE"
 
+  running_kernel=$("$UNAME_BIN" -r) || fail "$boot_id" 'could not read the running kernel version.'
+  case "$running_kernel" in
+    *-pve-t2|*-t2-pve) ;;
+    *) fail "$boot_id" "running kernel ${running_kernel} is not a supported T2 kernel." ;;
+  esac
+  "$LSMOD_BIN" 2>/dev/null | awk '
+    NR > 1 && ($1 == "t2bce_core" || $1 == "t2bce_vhci") { found[$1] = 1 }
+    END { exit !(found["t2bce_core"] && found["t2bce_vhci"]) }
+  ' || fail "$boot_id" 't2bce_core and t2bce_vhci are not both loaded.'
+  "$MODINFO_BIN" zfs >/dev/null 2>&1 || fail "$boot_id" 'the ZFS kernel module metadata is unavailable for the running kernel.'
+
   ip_addr=$(route_ip) || fail "$boot_id" 'vmbr0 has no active global IPv4 default-route source.'
   "$GETENT_BIN" ahostsv4 pve-mbp 2>/dev/null |
     awk -v wanted="$ip_addr" '$1 == wanted { found=1 } END { exit !found }' ||
@@ -85,7 +99,7 @@ main() {
   status_tmp="${STATUS_FILE}.tmp"
   printf 'ready %s %s\n' "$boot_id" "$ip_addr" > "$status_tmp"
   mv -f -- "$status_tmp" "$STATUS_FILE"
-  log "SSH, vmbr0 (${ip_addr}), local-lvm, and the HTTPS endpoint were observed after reboot."
+  log "T2 kernel ${running_kernel}, T2BCE modules, ZFS module, SSH, vmbr0 (${ip_addr}), local-lvm, and HTTPS endpoint were observed after reboot."
   log 'HTTPS reachability was checked without validating the certificate name against the current DHCP address.'
 }
 

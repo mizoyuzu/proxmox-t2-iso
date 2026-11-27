@@ -35,6 +35,12 @@ on_error() {
 }
 trap on_error ERR
 
+running_kernel=$(uname -r)
+case "$running_kernel" in
+  *-pve-t2|*-t2-pve) ;;
+  *) die "refusing first-boot provisioning on non-T2 kernel ${running_kernel}; boot the T2 kernel and retry." ;;
+esac
+
 # network-online.target can precede DHCP completion, so wait for actual IPv4/DNS.
 wait_for_network() {
   local timeout=120 interval=2 elapsed=0 default_route
@@ -153,7 +159,8 @@ grub_t2_id_path() {
 
       if (in_menuentry && !menuentry_checked && submenu_count > 0 &&
           tolower(entry_title) !~ /\(recovery mode\)$/ &&
-          line ~ /^[[:space:]]*linux(efi|16|efi16)?[[:space:]]/ && tolower(line) ~ /t2-pve/ &&
+          line ~ /^[[:space:]]*linux(efi|16|efi16)?[[:space:]]/ &&
+          tolower(line) ~ /(-pve-t2|-t2-pve)([[:space:]]|$)/ &&
           tolower(line) !~ /[[:space:]]single([[:space:]]|$)/) {
         menuentry_checked = 1
         kernel_line = line
@@ -164,7 +171,7 @@ grub_t2_id_path() {
         if (kernel_path !~ /^vmlinuz-[^/]+$/) next
         kernel_version = kernel_path
         sub(/^vmlinuz-/, "", kernel_version)
-        if (kernel_version == "" || tolower(kernel_version) !~ /-t2-pve$/ ||
+        if (kernel_version == "" || tolower(kernel_version) !~ /(-pve-t2|-t2-pve)$/ ||
             entry_id == "" || submenu_count != 1) next
 
         # Debian 10_linux emits a version-specific advanced entry as

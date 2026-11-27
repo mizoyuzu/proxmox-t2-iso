@@ -111,11 +111,10 @@ case "$recipe_min_mb" in
   ''|*[!0-9]*) reject 'Debian returned an invalid recipe minimum size.' ;;
 esac
 
-# Calculate all finite expansion ahead of the final PV. Current pve-final has
-# 512 MB of /boot headroom (1536 max minus 1024 min); partman consumes that
-# before the final max=-1 PV receives remaining space. Keep this calculation
+# Calculate all finite expansion ahead of the final PV. Keep this calculation
 # driven by Debian's decoded recipe so future edits cannot silently under-size
-# the pve VG.
+# the pve VG. The current recipe uses a fixed 2 GiB /boot and has no finite
+# growth before the final PV.
 expand_headroom_mb=0
 lvm_count=0
 lvm_last=no

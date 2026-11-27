@@ -1,7 +1,7 @@
 decode_recipe() {
   scheme=$(printf '%s\n' \
     '512 512 512 fat32 $iflabel{ gpt } method{ efi } format{ }' \
-    '1024 1536 1536 ext4 method{ format } mountpoint{ /boot }' \
+    '2048 2048 2048 ext4 method{ format } mountpoint{ /boot }' \
     '4096 4096 4096 linux-swap method{ swap }' \
     '20480 20480 32768 ext4 method{ format } mountpoint{ / }' \
     '1 1 -1 free $primary{ } method{ lvm } vg_name{ pve }')

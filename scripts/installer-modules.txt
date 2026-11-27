@@ -1,0 +1,56 @@
+# Storage and removable media
+nvme
+nvme_core
+ahci
+libahci
+sd_mod
+sr_mod
+cdrom
+usb_storage
+uas
+loop
+dm_mod
+
+# Installer filesystems
+ext4
+vfat
+fat
+isofs
+overlay
+squashfs
+nls_cp437
+nls_utf8
+
+# T2, keyboard, and input
+t2bce_core
+t2bce_vhci
+t2bce_audio
+t2bce_dma
+t2bce_ave
+applesmc
+apple_gmux
+hid
+hid_generic
+usbhid
+hid_apple
+hid_appletb_bl
+hid_appletb_kbd
+hid_magicmouse
+
+# USB / Thunderbolt controllers and network
+xhci_pci
+xhci_hcd
+typec
+typec_ucsi
+thunderbolt
+r8152
+usbnet
+cdc_ether
+cdc_ncm
+thunderbolt_net
+tg3
+
+# Crypto used by storage/filesystems
+crc32c
+libcrc32c
+crc32c_intel

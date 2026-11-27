@@ -38,6 +38,20 @@ if [[ ! -f "$ROOT/preseed.cfg" ]]; then
   echo "ERROR: preseed file is missing: $ROOT/preseed.cfg" >&2
   exit 1
 fi
+if [[ ! -f "$ROOT/preseed-manual.cfg" ]]; then
+  echo "ERROR: manual preseed file is missing: $ROOT/preseed-manual.cfg" >&2
+  exit 1
+fi
+for required_file in \
+  scripts/select-kernel-deb.sh \
+  scripts/installer-modules.txt \
+  scripts/stage-installer-modules.sh \
+  scripts/t2-target-setup.sh; do
+  if [[ ! -f "$ROOT/$required_file" ]]; then
+    echo "ERROR: required installer helper is missing: $ROOT/$required_file" >&2
+    exit 1
+  fi
+done
 if [[ ! -f "$ROOT/scripts/first-boot-proxmox.sh" ]]; then
   echo "ERROR: first-boot script is missing: $ROOT/scripts/first-boot-proxmox.sh" >&2
   exit 1
@@ -79,13 +93,9 @@ if [[ "${SSH_AUTHORIZED_KEYS_FILE+x}" == x && -z "$SSH_AUTHORIZED_KEYS_FILE" ]];
   exit 1
 fi
 
-shopt -s nullglob
-KERNEL_DEBS=("$KERNEL_DEB_DIR"/linux-image-*.deb)
-shopt -u nullglob
-if (( ${#KERNEL_DEBS[@]} == 0 )); then
-  echo "ERROR: no linux-image-*.deb files found in $KERNEL_DEB_DIR" >&2
-  exit 1
-fi
+KERNEL_DEB="$("$ROOT/scripts/select-kernel-deb.sh" "$KERNEL_DEB_DIR")"
+KERNEL_DEB_PACKAGE="$(dpkg-deb -f "$KERNEL_DEB" Package)"
+echo "installer kernel package: $KERNEL_DEB_PACKAGE ($(basename "$KERNEL_DEB"))"
 
 rm -rf -- "$WORK"
 mkdir -p "$TREE" "$INITRD_DIR"
@@ -100,28 +110,33 @@ if [[ ! -e "$TREE/.disk/id" ]]; then
   exit 1
 fi
 
-# --- 2. カーネル .deb から vmlinuz / モジュールを取り出す ---
+# --- 2. 選択したカーネル image .deb から vmlinuz / モジュールを取り出す ---
 KEX="$WORK/kernel-extract"
 mkdir -p "$KEX"
-for deb in "${KERNEL_DEBS[@]}"; do
-  dpkg-deb -x "$deb" "$KEX"
-done
+dpkg-deb -x "$KERNEL_DEB" "$KEX"
 mapfile -t KERNEL_IMAGES < <(find "$KEX/boot" -maxdepth 1 -type f -name 'vmlinuz-*' -print | sort)
 if (( ${#KERNEL_IMAGES[@]} != 1 )); then
-  echo "ERROR: expected exactly one boot/vmlinuz-* in linux-image debs, found ${#KERNEL_IMAGES[@]}" >&2
+  echo "ERROR: expected exactly one boot/vmlinuz-* in selected kernel image deb, found ${#KERNEL_IMAGES[@]}" >&2
   exit 1
 fi
 KVMLINUZ="${KERNEL_IMAGES[0]}"
 KVER_FULL="$(basename "$KVMLINUZ" | sed 's/^vmlinuz-//')"
+EXPECTED_PVE_KVER="${T2_EXPECTED_PVE_KVER:-7.0.14-30-pve-t2}"
 MODULES_DIR="$KEX/lib/modules/$KVER_FULL"
 if [[ ! -d "$MODULES_DIR" ]]; then
-  echo "ERROR: kernel modules are missing from linux-image debs: $MODULES_DIR" >&2
+  echo "ERROR: kernel modules are missing from selected image deb: $MODULES_DIR" >&2
   exit 1
+fi
+if [[ "$KERNEL_DEB_PACKAGE" == proxmox-kernel-* ]]; then
+  [[ "$KERNEL_DEB_PACKAGE" == proxmox-kernel-*-pve-t2 && "$KVER_FULL" == "$EXPECTED_PVE_KVER" ]] || {
+    echo "ERROR: selected PVE image kernel must be $EXPECTED_PVE_KVER, found $KERNEL_DEB_PACKAGE / $KVER_FULL" >&2
+    exit 1
+  }
 fi
 echo "installer kernel: $KVER_FULL"
 # Keep the stock Debian kernel for the untouched GTK initrd, which contains
 # Debian ABI modules. GTK entries are redirected before the T2 kernel replaces
-# /install.amd/vmlinuz; text and T2-auto entries keep using the T2 kernel.
+# /install.amd/vmlinuz; text, T2-auto, and T2-manual entries use the T2 kernel.
 if [[ ! -f "$TREE/install.amd/vmlinuz" ]]; then
   echo "ERROR: source ISO is missing /install.amd/vmlinuz" >&2
   exit 1
@@ -129,7 +144,7 @@ fi
 cp -- "$TREE/install.amd/vmlinuz" "$TREE/install.amd/vmlinuz-debian"
 cp -- "$KVMLINUZ" "$TREE/install.amd/vmlinuz"
 
-# --- 3. initrd 再構築 ---
+# --- 3. initrd を必要な module のみで再構築 ---
 # fakeroot supplies the root/device-node metadata cpio needs without requiring
 # privileges from the Actions runner. Extraction and repacking share one
 # fakeroot metadata session so cpio's fake device nodes retain their types.
@@ -137,68 +152,100 @@ fakeroot -- bash -c '
 set -euo pipefail
 initrd_dir="$1"
 initrd_gz="$2"
-modules_dir="$3"
 kver="$4"
+kernel_extract="$5"
+stage_script="$6"
 
 cd "$initrd_dir"
 gzip -dc "$initrd_gz" | cpio -idm --quiet
-rm -f -- preseed.cfg
-mkdir -p "lib/modules/$kver"
-cp -a "$modules_dir/." "lib/modules/$kver/"
-depmod -b "$initrd_dir" "$kver"
+rm -f -- preseed.cfg preseed-manual.cfg
+"$stage_script" "$kernel_extract" "$kver" "$initrd_dir"
 
 # brcm firmware is post-install payload only, never part of the installer initrd.
 rm -rf -- lib/firmware/brcm
 
 find . -print0 | cpio --null -o -H newc --quiet | gzip -9 > "$initrd_gz"
-' bash "$INITRD_DIR" "$TREE/install.amd/initrd.gz" "$MODULES_DIR" "$KVER_FULL"
+' bash "$INITRD_DIR" "$TREE/install.amd/initrd.gz" "$MODULES_DIR" "$KVER_FULL" "$KEX" "$ROOT/scripts/stage-installer-modules.sh"
+
+INITRD_MAX_BYTES="${T2_INITRD_MAX_BYTES:-209715200}"
+[[ "$INITRD_MAX_BYTES" =~ ^[0-9]+$ ]] || { echo "ERROR: invalid T2_INITRD_MAX_BYTES: $INITRD_MAX_BYTES" >&2; exit 1; }
+INITRD_SIZE="$(stat -c '%s' "$TREE/install.amd/initrd.gz")"
+if (( INITRD_SIZE > INITRD_MAX_BYTES )); then
+  echo "ERROR: rebuilt installer initrd is ${INITRD_SIZE} bytes, over the ${INITRD_MAX_BYTES}-byte cap" >&2
+  exit 1
+fi
+gzip -t "$TREE/install.amd/initrd.gz"
+echo "installer initrd size: $INITRD_SIZE bytes (limit $INITRD_MAX_BYTES)"
 
 # Re-extract the packed archive and check device-node types while the same
 # fakeroot metadata session is alive. A separate fakeroot invocation would
 # not retain the fake device metadata created by cpio.
 rm -rf -- "$INITRD_VERIFY_DIR"
 mkdir -p "$INITRD_VERIFY_DIR"
-if ! fakeroot -- bash -c 'set -euo pipefail; cd "$1"; gzip -dc "$2" | cpio -idm --quiet; test -c "$1/dev/console"; test -c "$1/dev/null"; test ! -e preseed.cfg' \
+if ! fakeroot -- bash -c 'set -euo pipefail; cd "$1"; gzip -dc "$2" | cpio -idm --quiet; test -c "$1/dev/console"; test -c "$1/dev/null"; test ! -e preseed.cfg; test ! -e preseed-manual.cfg' \
   bash "$INITRD_VERIFY_DIR" "$TREE/install.amd/initrd.gz"; then
   rm -rf -- "$INITRD_VERIFY_DIR"
-  echo "ERROR: rebuilt initrd failed validation: device nodes must be character devices and preseed.cfg must be absent" >&2
+  echo "ERROR: rebuilt initrd failed validation: device nodes must be character devices and both preseed files must be absent" >&2
   exit 1
 fi
 rm -rf -- "$INITRD_VERIFY_DIR"
 
-# --- 3a. Preseed is included only by the explicit T2 automated entry ---
+# --- 3a. Both preseed files share one small cpio and one T2 initrd ---
 PRESEED_STAGE="$(mktemp -d "$WORK/preseed-stage.XXXXXX")"
 PRESEED_VERIFY_DIR="$(mktemp -d "$WORK/preseed-verify.XXXXXX")"
 cp -- "$ROOT/preseed.cfg" "$PRESEED_STAGE/preseed.cfg"
-(cd "$PRESEED_STAGE" && printf '%s\n' preseed.cfg | cpio -o -H newc --owner=0:0 --quiet) > "$TREE/install.amd/preseed-initrd.cpio"
+cp -- "$ROOT/preseed-manual.cfg" "$PRESEED_STAGE/preseed-manual.cfg"
+(cd "$PRESEED_STAGE" && printf '%s\n' preseed.cfg preseed-manual.cfg | cpio -o -H newc --owner=0:0 --quiet) > "$TREE/install.amd/preseed-initrd.cpio"
 chmod 0644 "$TREE/install.amd/preseed-initrd.cpio"
 
 PRESEED_MEMBERS="$(cpio -it < "$TREE/install.amd/preseed-initrd.cpio")"
-if [[ "$PRESEED_MEMBERS" != "preseed.cfg" && "$PRESEED_MEMBERS" != "./preseed.cfg" ]]; then
-  echo "ERROR: preseed initrd must contain only preseed.cfg, found: $PRESEED_MEMBERS" >&2
+if [[ "$PRESEED_MEMBERS" != $'preseed.cfg\npreseed-manual.cfg' && "$PRESEED_MEMBERS" != $'./preseed.cfg\n./preseed-manual.cfg' ]]; then
+  echo "ERROR: preseed initrd must contain exactly preseed.cfg and preseed-manual.cfg, found: $PRESEED_MEMBERS" >&2
   exit 1
 fi
 (cd "$PRESEED_VERIFY_DIR" && cpio -idm --quiet < "$TREE/install.amd/preseed-initrd.cpio")
-if ! cmp -s -- "$ROOT/preseed.cfg" "$PRESEED_VERIFY_DIR/preseed.cfg"; then
-  echo "ERROR: preseed initrd contents differ from $ROOT/preseed.cfg" >&2
+for preseed in preseed.cfg preseed-manual.cfg; do
+  if ! cmp -s -- "$ROOT/$preseed" "$PRESEED_VERIFY_DIR/$preseed"; then
+    echo "ERROR: preseed initrd contents differ from $ROOT/$preseed" >&2
+    exit 1
+  fi
+done
+if ! grep -q 'localechooser/languagelist select ja' "$PRESEED_VERIFY_DIR/preseed.cfg" ||
+   ! grep -q 'debian-installer/language string ja' "$PRESEED_VERIFY_DIR/preseed.cfg" ||
+   ! grep -q 'localechooser/languagelist select ja' "$PRESEED_VERIFY_DIR/preseed-manual.cfg" ||
+   ! grep -q 'debian-installer/language string ja' "$PRESEED_VERIFY_DIR/preseed-manual.cfg"; then
+  echo "ERROR: both preseeds must select Japanese in localechooser and debian-installer/language" >&2
   exit 1
 fi
-if ! grep -q 'localechooser/languagelist select ja' "$PRESEED_VERIFY_DIR/preseed.cfg" ||
-   ! grep -q 'debian-installer/language string ja' "$PRESEED_VERIFY_DIR/preseed.cfg"; then
-  echo "ERROR: preseed must select ja in both localechooser/languagelist and debian-installer/language" >&2
+if grep -Eq '^d-i passwd/(root-password|root-password-again|user-password|user-password-again)[[:space:]]' \
+  "$PRESEED_VERIFY_DIR/preseed.cfg" "$PRESEED_VERIFY_DIR/preseed-manual.cfg"; then
+  echo "ERROR: root/user passwords must remain interactive and must not be embedded in preseed" >&2
+  exit 1
+fi
+if ! grep -Fq '2048 2048 2048 ext4' "$PRESEED_VERIFY_DIR/preseed.cfg" ||
+   ! grep -q '^d-i partman/early_command string' "$PRESEED_VERIFY_DIR/preseed.cfg"; then
+  echo "ERROR: automatic preseed must use a fixed 2 GiB /boot and install the partman safety guard" >&2
+  exit 1
+fi
+if grep -Eq '^d-i partman-auto/|^d-i partman/choose_partition select finish|^d-i partman/early_command' "$PRESEED_VERIFY_DIR/preseed-manual.cfg"; then
+  echo "ERROR: manual preseed must not set partman-auto, finish partitioning, or install the auto guard" >&2
   exit 1
 fi
 
-cat -- "$TREE/install.amd/preseed-initrd.cpio" "$TREE/install.amd/initrd.gz" > "$TREE/install.amd/initrd-t2auto"
-chmod 0644 "$TREE/install.amd/initrd-t2auto"
+cat -- "$TREE/install.amd/preseed-initrd.cpio" "$TREE/install.amd/initrd.gz" > "$TREE/install.amd/initrd-t2"
+chmod 0644 "$TREE/install.amd/initrd-t2"
 PRESEED_INITRD_SIZE="$(stat -c '%s' "$TREE/install.amd/preseed-initrd.cpio")"
-T2AUTO_INITRD_SIZE="$(stat -c '%s' "$TREE/install.amd/initrd-t2auto")"
+T2_INITRD_SIZE="$(stat -c '%s' "$TREE/install.amd/initrd-t2")"
 if [[ "$(head -c 6 "$TREE/install.amd/preseed-initrd.cpio")" != "070701" ]] ||
-   [[ "$(head -c 6 "$TREE/install.amd/initrd-t2auto")" != "070701" ]] ||
-   ! cmp -n "$PRESEED_INITRD_SIZE" -- "$TREE/install.amd/preseed-initrd.cpio" "$TREE/install.amd/initrd-t2auto" ||
-   ! tail -c "+$((PRESEED_INITRD_SIZE + 1))" "$TREE/install.amd/initrd-t2auto" | cmp - "$TREE/install.amd/initrd.gz" ||
-   (( T2AUTO_INITRD_SIZE != PRESEED_INITRD_SIZE + $(stat -c '%s' "$TREE/install.amd/initrd.gz") )); then
-  echo "ERROR: combined T2 initrd is not preseed cpio followed by the main initrd" >&2
+   [[ "$(head -c 6 "$TREE/install.amd/initrd-t2")" != "070701" ]] ||
+   ! cmp -n "$PRESEED_INITRD_SIZE" -- "$TREE/install.amd/preseed-initrd.cpio" "$TREE/install.amd/initrd-t2" ||
+   ! tail -c "+$((PRESEED_INITRD_SIZE + 1))" "$TREE/install.amd/initrd-t2" | cmp - "$TREE/install.amd/initrd.gz" ||
+   (( T2_INITRD_SIZE != PRESEED_INITRD_SIZE + $(stat -c '%s' "$TREE/install.amd/initrd.gz") )); then
+  echo "ERROR: combined T2 initrd is not the two-preseed cpio followed by the main initrd" >&2
+  exit 1
+fi
+if (( T2_INITRD_SIZE > INITRD_MAX_BYTES + PRESEED_INITRD_SIZE )); then
+  echo "ERROR: combined T2 initrd exceeds the configured size cap" >&2
   exit 1
 fi
 rm -rf -- "$PRESEED_STAGE" "$PRESEED_VERIFY_DIR"
@@ -206,7 +253,7 @@ rm -rf -- "$PRESEED_STAGE" "$PRESEED_VERIFY_DIR"
 # --- 4. GRUB / isolinux: preserve normal install as the safe default ---
 # Debian 13.8.0 amd64's top-level entries start with Graphical install, Install.
 # Put the final global settings after the source config so no later source line
-# can override them, then append the explicitly-selected automated entry.
+# can override them, then append the explicitly-selected T2 entries.
 python3 - "$TREE/boot/grub/grub.cfg" <<'PYEOF'
 import re
 import sys
@@ -228,15 +275,20 @@ set timeout=30
 menuentry --hotkey=t 'Automated install (T2 Proxmox) - uses largest free space' {
     set background_color=black
     linux    /install.amd/vmlinuz auto=true priority=critical preseed/file=/preseed.cfg --- quiet
-    initrd   /install.amd/initrd-t2auto
+    initrd   /install.amd/initrd-t2
+}
+menuentry --hotkey=m 'Manual partition install (T2 Proxmox)' {
+    set background_color=black
+    linux    /install.amd/vmlinuz auto=true priority=medium preseed/file=/preseed-manual.cfg --- quiet
+    initrd   /install.amd/initrd-t2
 }
 """
 with open(path, "w", encoding="utf-8") as config:
     config.write(src.rstrip() + "\n" + entry.lstrip())
-print("grub.cfg: default=Install, timeout=30, T2 automated entry appended")
+print("grub.cfg: default=Install, timeout=30, T2 auto/manual entries appended")
 PYEOF
 
-# Verify the preseed appears only in the explicit T2 menu entry and normal Install remains safe.
+# Verify each preseed appears only in its explicit T2 menu entry and normal Install remains safe.
 python3 - "$TREE/boot/grub/grub.cfg" <<'PYEOF'
 import re
 import sys
@@ -314,24 +366,33 @@ if not gtk_rewrites:
 open(path, "w", encoding="utf-8").write(src)
 lines, parsed_entries = menuentries(src)
 entries = [(entry, top_level) for _start, _end, entry, top_level in parsed_entries]
-marker_count = src.count("--hotkey=t")
-preseed_count = src.count("preseed/file")
-combined_count = src.count("initrd-t2auto")
-if (marker_count, preseed_count, combined_count) != (1, 1, 1):
-    raise SystemExit("ERROR: GRUB must contain exactly one T2 hotkey, preseed path, and combined initrd")
+if (src.count("--hotkey=t"), src.count("--hotkey=m"), src.count("preseed/file"),
+        src.count("/preseed.cfg"), src.count("/preseed-manual.cfg"), src.count("/install.amd/initrd-t2")) != (1, 1, 2, 1, 1, 2):
+    raise SystemExit("ERROR: GRUB must contain one auto/manual hotkey, one path per preseed, and two references to the shared initrd")
 
-t2_entries = [(entry, top_level) for entry, top_level in entries if "preseed/file" in entry or "initrd-t2auto" in entry]
-expected_title = "Automated install (T2 Proxmox) - uses largest free space"
-if len(t2_entries) != 1 or not t2_entries[0][1] or not re.search(r"(?m)^\s*menuentry\s+--hotkey=t\s+'" + re.escape(expected_title) + r"'\s*\{", t2_entries[0][0]):
-    raise SystemExit("ERROR: only the named top-level T2 automated GRUB menuentry may use the preseed/combined initrd")
-if "auto=true priority=critical preseed/file=/preseed.cfg --- quiet" not in t2_entries[0][0] or "/install.amd/initrd-t2auto" not in t2_entries[0][0]:
-    raise SystemExit("ERROR: T2 automated GRUB entry has incorrect boot arguments or initrd")
+t2_entries = [(entry, top_level) for entry, top_level in entries if "preseed/file" in entry or "/install.amd/initrd-t2" in entry]
+auto_title = "Automated install (T2 Proxmox) - uses largest free space"
+manual_title = "Manual partition install (T2 Proxmox)"
+if len(t2_entries) != 2 or any(not top_level for _entry, top_level in t2_entries):
+    raise SystemExit("ERROR: GRUB must contain exactly two top-level T2 preseed entries")
+auto_entries = [entry for entry, _top_level in t2_entries if "preseed/file=/preseed.cfg" in entry]
+manual_entries = [entry for entry, _top_level in t2_entries if "preseed/file=/preseed-manual.cfg" in entry]
+if len(auto_entries) != 1 or len(manual_entries) != 1:
+    raise SystemExit("ERROR: GRUB must contain exactly one auto and one manual preseed entry")
+if (not re.search(r"(?m)^\s*menuentry\s+--hotkey=t\s+'" + re.escape(auto_title) + r"'\s*\{", auto_entries[0]) or
+        "auto=true priority=critical preseed/file=/preseed.cfg --- quiet" not in auto_entries[0] or
+        "/install.amd/initrd-t2" not in auto_entries[0]):
+    raise SystemExit("ERROR: T2 automatic GRUB entry has incorrect title, boot arguments, or initrd")
+if (not re.search(r"(?m)^\s*menuentry\s+--hotkey=m\s+'" + re.escape(manual_title) + r"'\s*\{", manual_entries[0]) or
+        "auto=true priority=medium preseed/file=/preseed-manual.cfg --- quiet" not in manual_entries[0] or
+        "/install.amd/initrd-t2" not in manual_entries[0]):
+    raise SystemExit("ERROR: T2 manual GRUB entry has incorrect title, boot arguments, or shared initrd")
 
 install_entries = [entry for entry, _top_level in entries if re.search(r"(?m)^\s*menuentry\s+--hotkey=i\s+'Install'", entry)]
 if (len(install_entries) != 1 or not re.search(r"(?m)^\s*linux\s+/install\.amd/vmlinuz(?:\s|$)", install_entries[0]) or
         "/install.amd/vmlinuz-debian" in install_entries[0] or
         "/install.amd/initrd.gz" not in install_entries[0] or
-        "preseed/file" in install_entries[0] or "initrd-t2auto" in install_entries[0]):
+        "preseed/file" in install_entries[0] or "initrd-t2" in install_entries[0]):
     raise SystemExit("ERROR: stock Install GRUB entry must keep the T2 kernel and main initrd")
 gtk_entries = [entry for entry, _top_level in entries if "/install.amd/gtk/initrd.gz" in entry]
 if not gtk_entries or any(
@@ -339,10 +400,10 @@ if not gtk_entries or any(
         for entry in gtk_entries):
     raise SystemExit("ERROR: stock GRUB GTK entries must use the preserved Debian kernel")
 if any("/install.amd/vmlinuz " not in entry for entry, _top_level in t2_entries):
-    raise SystemExit("ERROR: T2 automated GRUB entry must keep the T2 kernel")
+    raise SystemExit("ERROR: T2 preseed entries must keep the T2 kernel")
 if not re.search(r'(?m)^set default="Install"$', src) or not re.search(r"(?m)^set timeout=30$", src):
     raise SystemExit('ERROR: GRUB default must be Install with timeout=30')
-print(f"grub.cfg: {gtk_rewrites} GTK entries use Debian kernel; T2 Install/default/auto verified")
+print(f"grub.cfg: {gtk_rewrites} GTK entries use Debian kernel; stock Install/default and T2 auto/manual verified")
 PYEOF
 
 # BIOS (isolinux) fallback; deliberately leave its existing default unchanged.
@@ -353,12 +414,17 @@ fi
 cat >> "$TREE/isolinux/txt.cfg" <<'EOF'
 
 label t2auto
- menu label ^Automated install (T2 Proxmox) - uses largest free space
+ menu label ^T2 automated install (largest free space)
  kernel /install.amd/vmlinuz
- append auto=true priority=critical preseed/file=/preseed.cfg initrd=/install.amd/initrd-t2auto --- quiet
+ append auto=true priority=critical preseed/file=/preseed.cfg initrd=/install.amd/initrd-t2 --- quiet
+
+label t2manual
+ menu label ^Manual partition install (T2 Proxmox)
+ kernel /install.amd/vmlinuz
+ append auto=true priority=medium preseed/file=/preseed-manual.cfg initrd=/install.amd/initrd-t2 --- quiet
 EOF
 
-# Verify isolinux also gates the preseed and combined initrd to the t2auto label only.
+# Verify isolinux gates the shared initrd and each preseed to its matching T2 label.
 python3 - "$TREE/isolinux" <<'PYEOF'
 import re
 import sys
@@ -418,15 +484,21 @@ for path in sorted(Path(sys.argv[1]).rglob("*.cfg")):
         label_bodies.append((current, "\n".join(body)))
 combined = "\n".join(all_text)
 t2auto_entries = [body for name, body in label_bodies if name == "t2auto"]
-if len(t2auto_entries) != 1:
-    raise SystemExit("ERROR: isolinux t2auto label is missing")
-if combined.count("preseed/file") != 1 or combined.count("initrd-t2auto") != 1:
-    raise SystemExit("ERROR: isolinux must contain exactly one preseed path and combined initrd")
+t2manual_entries = [body for name, body in label_bodies if name == "t2manual"]
+if len(t2auto_entries) != 1 or len(t2manual_entries) != 1:
+    raise SystemExit("ERROR: isolinux t2auto and t2manual labels must each exist exactly once")
+if (combined.count("preseed/file") != 2 or combined.count("/preseed.cfg") != 1 or
+        combined.count("/preseed-manual.cfg") != 1 or combined.count("/install.amd/initrd-t2") != 2):
+    raise SystemExit("ERROR: isolinux must have one path per preseed and two references to the shared initrd")
 if ("preseed/file=/preseed.cfg" not in t2auto_entries[0] or
-        "initrd=/install.amd/initrd-t2auto" not in t2auto_entries[0] or
+        "initrd=/install.amd/initrd-t2" not in t2auto_entries[0] or
         not re.search(r"(?m)^\s*kernel\s+/install\.amd/vmlinuz\s*$", t2auto_entries[0])):
-    raise SystemExit("ERROR: isolinux t2auto label must keep the T2 kernel and combined initrd")
-if any("preseed/file" in body or "initrd-t2auto" in body for name, body in label_bodies if name != "t2auto"):
+    raise SystemExit("ERROR: isolinux t2auto label must keep its preseed and the shared T2 initrd")
+if ("preseed/file=/preseed-manual.cfg" not in t2manual_entries[0] or
+        "initrd=/install.amd/initrd-t2" not in t2manual_entries[0] or
+        not re.search(r"(?m)^\s*kernel\s+/install\.amd/vmlinuz\s*$", t2manual_entries[0])):
+    raise SystemExit("ERROR: isolinux t2manual label must keep its preseed and the shared T2 initrd")
+if any("preseed/file" in body or "initrd-t2" in body for name, body in label_bodies if name not in ("t2auto", "t2manual")):
     raise SystemExit("ERROR: stock isolinux labels must not use preseed or combined initrd")
 install_labels = [body for name, body in label_bodies if name == "install"]
 if (len(install_labels) != 1 or not re.search(r"(?m)^\s*kernel\s+/install\.amd/vmlinuz\s*$", install_labels[0]) or
@@ -439,18 +511,18 @@ if not gtk_labels or any(
         any(kernel != "/install.amd/vmlinuz-debian" for kernel in re.findall(r"(?m)^\s*ontimeout\s+(\S+)", body))
         for body in gtk_labels):
     raise SystemExit("ERROR: stock isolinux GTK labels must use the preserved Debian kernel")
-if "/install.amd/vmlinuz" not in t2auto_entries[0]:
-    raise SystemExit("ERROR: isolinux T2 automated entry must keep the T2 kernel")
-print(f"isolinux: {gtk_count} GTK labels use Debian kernel; T2 text/default/auto verified")
+if "/install.amd/vmlinuz" not in t2auto_entries[0] or "/install.amd/vmlinuz" not in t2manual_entries[0]:
+    raise SystemExit("ERROR: isolinux T2 entries must keep the T2 kernel")
+print(f"isolinux: {gtk_count} GTK labels use Debian kernel; stock Install and T2 auto/manual verified")
 PYEOF
 
 # --- 5. /t2 post-install payload ---
 mkdir -p "$TREE/t2/debs" "$TREE/t2/scripts" "$TREE/t2/systemd"
-for deb in "${KERNEL_DEBS[@]}"; do
-  cp -- "$deb" "$TREE/t2/debs/"
-done
+cp -- "$KERNEL_DEB" "$TREE/t2/debs/"
 cp -- "$ROOT/scripts/first-boot-proxmox.sh" "$TREE/t2/scripts/first-boot-proxmox.sh"
 chmod 0755 "$TREE/t2/scripts/first-boot-proxmox.sh"
+cp -- "$ROOT/scripts/t2-target-setup.sh" "$TREE/t2/scripts/t2-target-setup.sh"
+chmod 0755 "$TREE/t2/scripts/t2-target-setup.sh"
 cp -- "$ROOT/scripts/disable-pve-enterprise-source.sh" "$TREE/t2/scripts/disable-pve-enterprise-source.sh"
 chmod 0755 "$TREE/t2/scripts/disable-pve-enterprise-source.sh"
 for helper in configure-pve-network.sh sync-pve-mbp-hosts.sh verify-pve-management-ready.sh; do

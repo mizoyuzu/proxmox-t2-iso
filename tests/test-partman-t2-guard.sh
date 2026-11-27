@@ -36,17 +36,17 @@ fi
 grep -q 'selected /dev/sda instead of /dev/nvme0n1' "$WORK/output"
 grep -q 'No disk has been partitioned' "$WORK/output"
 
-# pve-final has 26,113 MB minimum plus 512 MB /boot growth and a 36 MiB PV reserve.
-if run_guard "$TARGET_DIR" 26662748735; then
+# pve-final has 27,137 MB minimum, fixed 2 GiB /boot, and a 36 MiB PV reserve.
+if run_guard "$TARGET_DIR" 27174748735; then
   echo "FAIL: guard accepted an area without the required final PV reserve" >&2
   exit 1
 else
   status=$?
 fi
 [ "$status" -eq 255 ] || { cat "$WORK/output" >&2; echo "FAIL: size guard exit was $status, expected 255" >&2; exit 1; }
-grep -q '512 MB finite growth and 36 MiB for the final pve PV' "$WORK/output"
+grep -q '0 MB finite growth and 36 MiB for the final pve PV' "$WORK/output"
 
-if ! run_guard "$TARGET_DIR" 26662748736; then
+if ! run_guard "$TARGET_DIR" 27174748736; then
   cat "$WORK/output" >&2
   echo "FAIL: guard rejected the exact recipe fit, expansion, and reserve fixture" >&2
   exit 1

@@ -10,7 +10,7 @@ on:
       kernel_tag:
         description: "カーネル .deb のリリースタグ"
         required: true
-        default: "kernel-6.18.56-t2-pve-r3"
+        default: "kernel-7.0.14-30-pve-t2-r1"
 
 permissions:
   contents: read
@@ -47,6 +47,29 @@ jobs:
           set -euo pipefail
           mkdir -p debs
           gh release download "${{ inputs.kernel_tag }}" --pattern '*.deb' --dir debs
+
+      - name: Preflight selected PVE T2 image package
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          candidates=(debs/proxmox-kernel-*-pve-t2_*.deb)
+          images=()
+          for deb in "${candidates[@]}"; do
+            package="$(dpkg-deb -f "$deb" Package)"
+            if [[ "$package" =~ ^proxmox-kernel-[0-9][A-Za-z0-9.+~:-]*-pve-t2$ ]] &&
+               [[ ! "$package" =~ (headers|signed-template|meta) ]]; then
+              images+=("$deb")
+            fi
+          done
+          if (( ${#images[@]} != 1 )); then
+            echo "ERROR: expected exactly one proxmox-kernel PVE T2 image deb, found ${#images[@]}" >&2
+            printf 'Found: %s\n' "${images[*]:-none}" >&2
+            exit 1
+          fi
+          package="$(dpkg-deb -f "${images[0]}" Package)"
+          [[ "$package" =~ ^proxmox-kernel-[0-9][A-Za-z0-9.+~:-]*-pve-t2$ ]]
+          [[ ! "$package" =~ (headers|signed-template|meta) ]]
+          printf 'Preflight image: %s (%s)\n' "${images[0]}" "$package"
 
       - name: Firmware policy
         run: |
