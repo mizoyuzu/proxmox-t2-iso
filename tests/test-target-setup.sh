@@ -68,6 +68,25 @@ if [[ ${1:-} == sh && ${2:-} == -c ]]; then
   for version in ${T2_TEST_INSTALLED_KERNELS:-7.0.14-30-pve-t2}; do
     touch "$T2_TARGET_ROOT/boot/vmlinuz-$version" "$T2_TARGET_ROOT/boot/initrd.img-$version"
   done
+elif [[ ${1:-} == dpkg-query ]]; then
+  if [[ -n ${T2_TEST_INSTALLED_PACKAGES:-} ]]; then
+    for package in $T2_TEST_INSTALLED_PACKAGES; do
+      printf '%s\tinstalled\n' "$package"
+    done
+  else
+    for version in ${T2_TEST_INSTALLED_KERNELS:-7.0.14-30-pve-t2}; do
+      case "$version" in
+        *-pve-t2) package="proxmox-kernel-$version" ;;
+        *-t2-pve) package="linux-image-$version" ;;
+        *) package="unsupported-$version" ;;
+      esac
+      printf '%s\tinstalled\n' "$package"
+    done
+  fi
+elif [[ ${1:-} == apt-mark && ${2:-} == hold ]]; then
+  printf '%s\n' "${@:3}" >> "$T2_TEST_HOLD_FILE"
+elif [[ ${1:-} == apt-mark && ${2:-} == showhold ]]; then
+  [[ ! -f $T2_TEST_HOLD_FILE ]] || cat "$T2_TEST_HOLD_FILE"
 fi
 EOF
 chmod 0755 "$BIN"/*
@@ -77,6 +96,7 @@ make_case() {
   mkdir -p "$case_root/target/boot/efi" "$case_root/target/etc/default" \
     "$case_root/target/etc/initramfs-tools" "$case_root/cdrom/t2/debs" \
     "$case_root/cdrom/t2/scripts" "$case_root/cdrom/t2/systemd" \
+    "$case_root/target/tmp" \
     "$case_root/udev" "$case_root/sys/class/block/nvme0n1"
   printf 'UUID=root / ext4 defaults 0 1\nUUID=boot /boot ext4 defaults 0 2\nUUID=efi /boot/efi vfat defaults 0 2\nUUID=swap none swap sw 0 0\n' > "$case_root/target/etc/fstab"
   printf 'GRUB_DEFAULT=0\nGRUB_CMDLINE_LINUX_DEFAULT="quiet"\n' > "$case_root/target/etc/default/grub"
@@ -84,7 +104,7 @@ make_case() {
   printf '/dev/test-root %s ext4 rw 0 0\n/dev/test-boot %s ext4 rw 0 0\n' \
     "$case_root/target" "$case_root/target/boot" > "$case_root/proc-mounts"
   touch "$case_root/cdrom/t2/debs/proxmox-kernel-7.0.14-30-pve-t2_7.0.14-30_amd64.deb"
-  for script in first-boot-proxmox.sh configure-pve-network.sh sync-pve-mbp-hosts.sh \
+  for script in first-boot-proxmox.sh t2-kernel-state.sh configure-pve-network.sh sync-pve-mbp-hosts.sh \
     verify-pve-management-ready.sh disable-pve-enterprise-source.sh; do
     cp "$ROOT/scripts/$script" "$case_root/cdrom/t2/scripts/$script"
   done
@@ -93,6 +113,7 @@ make_case() {
   cp "$ROOT/scripts/pve-cluster-hosts-sync.conf" "$case_root/cdrom/t2/systemd/"
   printf '259:0\n' > "$case_root/sys/class/block/nvme0n1/dev"
   : > "$case_root/commands.log"
+  : > "$case_root/holds"
 }
 
 run_setup() {
@@ -102,7 +123,7 @@ run_setup() {
     T2_IN_TARGET_BIN="$BIN/in-target" T2_AUTO_DISK=/dev/nvme0n1 \
     T2_UDEV_DIR="$case_root/udev" T2_SYS_CLASS_BLOCK="$case_root/sys/class/block" \
     T2_PROC_MOUNTS="$case_root/proc-mounts" T2_TEST_BLOCK_DEVICES='/dev/nvme0n1p9 /dev/fakepv' \
-    T2_TEST_COMMAND_LOG="$case_root/commands.log" "$@" \
+    T2_TEST_COMMAND_LOG="$case_root/commands.log" T2_TEST_HOLD_FILE="$case_root/holds" "$@" \
     "$ROOT/scripts/t2-target-setup.sh" "$mode"
 }
 
@@ -113,12 +134,22 @@ assert_common_setup() {
     grep -Fxq "$module" "$case_root/target/etc/initramfs-tools/modules"
   done
   test -f "$case_root/target/usr/local/sbin/first-boot-proxmox.sh"
+  test -x "$case_root/target/usr/local/sbin/t2-kernel-state.sh"
   test -f "$case_root/target/etc/systemd/system/first-boot-proxmox.service"
   test -f "$case_root/target/etc/systemd/system/pve-management-ready.service"
   test -f "$case_root/target/etc/systemd/system/pve-cluster.service.d/10-pve-mbp-hosts-sync.conf"
   grep -Fxq 'PermitRootLogin yes' "$case_root/target/etc/ssh/sshd_config.d/10-t2.conf"
   grep -Fq 'systemctl enable ssh.service first-boot-proxmox.service pve-management-ready.service' "$case_root/commands.log"
   test ! -e "$case_root/target/tmp/t2-debs"
+  test "$(stat -c '%a' "$case_root/target/var/lib/t2/kernel")" = 755
+  test "$(stat -c '%a' "$case_root/target/var/lib/t2/kernel"/*.deb)" = 644
+  cmp -s "$case_root/cdrom/t2/debs"/*.deb "$case_root/target/var/lib/t2/kernel"/*.deb
+  grep -q '^in-target apt-mark hold ' "$case_root/commands.log"
+  grep -q '^in-target apt-mark showhold$' "$case_root/commands.log"
+  grep -q '^proxmox-kernel-7.0.14-30-pve-t2$' "$case_root/holds" ||
+    grep -q '^linux-image-6.18.56-t2-pve$' "$case_root/holds"
+  grep -q 'Held installed T2 kernel package .*apt-mark showhold' "$case_root/target/var/log/t2-target-setup.log"
+  grep -q 'Saved rescue kernel package .*mode 0644' "$case_root/target/var/log/t2-target-setup.log"
   grep -q 'Target setup completed successfully' "$case_root/target/var/log/t2-target-setup.log"
 }
 
@@ -206,6 +237,7 @@ run_setup "$WORK/manual-legacy-kernel" manual T2_TEST_UNASSIGNED_PVS='/dev/fakep
 grep -Fq 'update-initramfs -u -k 6.18.56-t2-pve' "$WORK/manual-legacy-kernel/commands.log"
 grep -q 'Validated installed T2 kernel 6.18.56-t2-pve and matching initrd' \
   "$WORK/manual-legacy-kernel/target/var/log/t2-target-setup.log"
+grep -Fq 'in-target apt-mark hold linux-image-6.18.56-t2-pve' "$WORK/manual-legacy-kernel/commands.log"
 assert_common_setup "$WORK/manual-legacy-kernel"
 
 # Never guess when more than one supported T2 kernel is present.

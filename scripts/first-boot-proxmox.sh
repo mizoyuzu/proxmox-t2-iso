@@ -8,6 +8,7 @@ readonly GRUB_CFG=/boot/grub/grub.cfg
 readonly DISABLE_PVE_ENTERPRISE_SOURCE=/usr/local/sbin/disable-pve-enterprise-source.sh
 readonly CONFIGURE_PVE_NETWORK=/usr/local/sbin/configure-pve-network.sh
 readonly SYNC_PVE_HOSTS=/usr/local/sbin/sync-pve-mbp-hosts.sh
+readonly T2_KERNEL_STATE=/usr/local/sbin/t2-kernel-state.sh
 
 if [[ $(id -u) -ne 0 ]]; then
   printf 'ERROR: run this script as root.\n' >&2
@@ -223,6 +224,41 @@ grub_default_matches() {
   ' "$config"
 }
 
+ensure_t2_kernel_hold() {
+  local package_listing package held_listing
+  local -a t2_packages=()
+
+  if ! package_listing=$(dpkg-query -W -f='${Package}\t${db:Status-Status}\n'); then
+    die 'could not query installed packages before reapplying the T2 kernel hold.'
+    return 1
+  fi
+  mapfile -t t2_packages < <(
+    printf '%s\n' "$package_listing" | awk -F '\t' '
+      $2 == "installed" &&
+        ($1 ~ /^proxmox-kernel-.+-pve-t2$/ || $1 ~ /^linux-image-.+-t2-pve$/) { print $1 }
+    '
+  )
+  if ((${#t2_packages[@]} != 1)); then
+    die "expected exactly one installed T2 kernel package to hold, found ${#t2_packages[@]} (${t2_packages[*]:-none})."
+    return 1
+  fi
+
+  package=${t2_packages[0]}
+  if ! apt-mark hold "$package"; then
+    die "could not reapply apt hold to T2 kernel package ${package}."
+    return 1
+  fi
+  if ! held_listing=$(apt-mark showhold); then
+    die 'apt-mark showhold failed after reapplying the T2 kernel hold.'
+    return 1
+  fi
+  if ! grep -Fxq -- "$package" <<<"$held_listing"; then
+    die "apt-mark showhold did not confirm T2 kernel package ${package}."
+    return 1
+  fi
+  log "Reapplied and verified apt hold for T2 kernel package ${package}."
+}
+
 write_grub_defaults() {
   local defaults_file=$1 wanted=$2 quoted defaults_line defaults_tmp
   printf -v quoted '%q' "$wanted"
@@ -432,7 +468,14 @@ fi
 # This final pass follows every package operation, since package hooks can
 # regenerate GRUB or install another kernel. The earlier pass already pinned
 # the T2 entry before any network or APT work, protecting an interrupted boot.
+ensure_t2_kernel_hold
 pin_t2_grub_default 'after all package operations'
+if [[ ! -x "$T2_KERNEL_STATE" ]]; then
+  die "T2 kernel state audit helper is missing or not executable: ${T2_KERNEL_STATE}."
+fi
+if ! "$T2_KERNEL_STATE"; then
+  die 'T2 kernel state audit failed after the final GRUB pin.'
+fi
 log 'Staging PVE-managed vmbr0 after the networking packages are installed.'
 network_choice=$("$CONFIGURE_PVE_NETWORK")
 read -r selected_nic staged_route_ip <<< "$network_choice"

@@ -150,13 +150,14 @@ STAGING_DIR="$TARGET/tmp/t2-debs"
 set -- "$DEB_DIR"/*.deb
 [ -f "$1" ] || fail "no kernel image deb found in $DEB_DIR."
 [ "$#" -eq 1 ] || fail "expected one kernel image deb in $DEB_DIR, found $#; remaster must stage only the image package."
+KERNEL_DEB_NAME=${1##*/}
 case "${1##*/}" in
   proxmox-kernel-*-pve-t2_*.deb|linux-image-*.deb) ;;
   *) fail "unexpected kernel package in ISO payload: ${1##*/}" ;;
 esac
 mkdir -p "$STAGING_DIR"
 cp -- "$1" "$STAGING_DIR/"
-log "Installing kernel package ${1##*/}."
+log "Installing kernel package $KERNEL_DEB_NAME."
 "$IN_TARGET" sh -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/t2-debs/*.deb'
 
 kernel_count=0
@@ -180,6 +181,31 @@ done
 [ "$INITRD_IMAGE" = "$TARGET/boot/initrd.img-$KVER" ] ||
   fail "T2 kernel/initrd versions do not match: $KVER and ${INITRD_IMAGE##*/initrd.img-}."
 log "Validated installed T2 kernel $KVER and matching initrd."
+
+package_listing=$("$IN_TARGET" dpkg-query -W -f='${Package}\t${db:Status-Status}\n') ||
+  fail 'could not query installed target packages to identify the T2 kernel package.'
+set -- $(printf '%s\n' "$package_listing" | awk -F '\t' '
+  $2 == "installed" &&
+    ($1 ~ /^proxmox-kernel-.+-pve-t2$/ || $1 ~ /^linux-image-.+-t2-pve$/) { print $1 }
+')
+[ "$#" -eq 1 ] || fail "expected exactly one installed T2 kernel package, found $# ($*)."
+T2_KERNEL_PACKAGE=$1
+case "$T2_KERNEL_PACKAGE" in
+  "proxmox-kernel-$KVER"|"linux-image-$KVER") ;;
+  *) fail "installed T2 package $T2_KERNEL_PACKAGE does not match kernel image $KVER." ;;
+esac
+"$IN_TARGET" apt-mark hold "$T2_KERNEL_PACKAGE" || fail "could not hold T2 kernel package $T2_KERNEL_PACKAGE."
+held_packages=$("$IN_TARGET" apt-mark showhold) || fail 'could not verify target apt holds.'
+printf '%s\n' "$held_packages" | awk -v wanted="$T2_KERNEL_PACKAGE" '$1 == wanted { found=1 } END { exit !found }' ||
+  fail "apt-mark hold did not persist for $T2_KERNEL_PACKAGE."
+log "Held installed T2 kernel package $T2_KERNEL_PACKAGE (confirmed by apt-mark showhold)."
+
+RESCUE_DEB_DIR="$TARGET/var/lib/t2/kernel"
+mkdir -p "$RESCUE_DEB_DIR"
+chmod 0755 "$RESCUE_DEB_DIR"
+cp -- "$STAGING_DIR/$KERNEL_DEB_NAME" "$RESCUE_DEB_DIR/"
+chmod 0644 "$RESCUE_DEB_DIR/$KERNEL_DEB_NAME"
+log "Saved rescue kernel package $RESCUE_DEB_DIR/$KERNEL_DEB_NAME (mode 0644)."
 
 MODULES_FILE="$TARGET/etc/initramfs-tools/modules"
 mkdir -p "${MODULES_FILE%/*}"
@@ -214,7 +240,7 @@ mv -f "$grub_tmp" "$GRUB_DEFAULT_FILE"
 
 mkdir -p "$TARGET/usr/local/sbin" "$TARGET/etc/systemd/system/pve-cluster.service.d" \
   "$TARGET/etc/ssh/sshd_config.d"
-for script in first-boot-proxmox.sh configure-pve-network.sh sync-pve-mbp-hosts.sh \
+for script in first-boot-proxmox.sh t2-kernel-state.sh configure-pve-network.sh sync-pve-mbp-hosts.sh \
   verify-pve-management-ready.sh disable-pve-enterprise-source.sh; do
   [ -f "$CDROM/t2/scripts/$script" ] || fail "required script payload is missing: $script"
   cp -- "$CDROM/t2/scripts/$script" "$TARGET/usr/local/sbin/$script"

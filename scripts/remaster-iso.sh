@@ -58,7 +58,8 @@ for required_file in \
   scripts/select-kernel-deb.sh \
   scripts/installer-modules.txt \
   scripts/stage-installer-modules.sh \
-  scripts/t2-target-setup.sh; do
+  scripts/t2-target-setup.sh \
+  scripts/t2-kernel-state.sh; do
   if [[ ! -f "$ROOT/$required_file" ]]; then
     echo "ERROR: required installer helper is missing: $ROOT/$required_file" >&2
     exit 1
@@ -534,6 +535,8 @@ mkdir -p "$TREE/t2/debs" "$TREE/t2/scripts" "$TREE/t2/systemd"
 cp -- "$KERNEL_DEB" "$TREE/t2/debs/"
 cp -- "$ROOT/scripts/first-boot-proxmox.sh" "$TREE/t2/scripts/first-boot-proxmox.sh"
 chmod 0755 "$TREE/t2/scripts/first-boot-proxmox.sh"
+cp -- "$ROOT/scripts/t2-kernel-state.sh" "$TREE/t2/scripts/t2-kernel-state.sh"
+chmod 0755 "$TREE/t2/scripts/t2-kernel-state.sh"
 cp -- "$ROOT/scripts/t2-target-setup.sh" "$TREE/t2/scripts/t2-target-setup.sh"
 chmod 0755 "$TREE/t2/scripts/t2-target-setup.sh"
 cp -- "$ROOT/scripts/disable-pve-enterprise-source.sh" "$TREE/t2/scripts/disable-pve-enterprise-source.sh"
