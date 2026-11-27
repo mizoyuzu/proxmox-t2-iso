@@ -78,11 +78,12 @@ jobs:
           echo "Resolved release tag: $tag"
 
       - name: Upload artifacts
-        if: ${{ success() }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: pve-t2-kernel-debs-r${{ inputs.revision }}
           path: out/*.deb
+          if-no-files-found: ignore
           retention-days: 30
 
       - name: Publish release

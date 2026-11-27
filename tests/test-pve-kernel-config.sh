@@ -49,9 +49,13 @@ CONTROL
   local module
   for module in \
     t2bce_core.ko t2bce_vhci.ko t2bce_audio.ko t2bce_dma.ko t2bce_ave.ko \
-    applesmc.ko apple_gmux.ko hid-appletb-kbd.ko hid-appletb-bl.ko appletbdrm.ko \
+    applesmc.ko apple-gmux.ko hid-appletb-kbd.ko hid-appletb-bl.ko appletbdrm.ko \
     zfs.ko spl.ko r8152.ko softdog.ko; do
     if [[ "$variant" == "missing-module" && "$module" == zfs.ko ]]; then
+      continue
+    fi
+    if [[ "$variant" == "wrong-gmux-name" && "$module" == apple-gmux.ko ]]; then
+      : > "$modules_root/kernel/fixture/apple_gmux.ko"
       continue
     fi
     : > "$modules_root/kernel/fixture/$module"
@@ -91,6 +95,9 @@ expect_failure "$wrong_t2_mode_deb" "CONFIG_T2BCE_CORE must be built as a module
 
 missing_module_deb="$(make_package missing-module proxmox-kernel-7.0.14-30-pve-t2 missing-module)"
 expect_failure "$missing_module_deb" "required kernel module is missing: zfs.ko"
+
+wrong_gmux_deb="$(make_package wrong-gmux-name proxmox-kernel-7.0.14-30-pve-t2 wrong-gmux-name)"
+expect_failure "$wrong_gmux_deb" "required kernel module is missing: apple-gmux.ko"
 
 headers_deb="$(make_package headers proxmox-headers-7.0.14-30-pve-t2 valid)"
 expect_failure "$headers_deb" "unexpected Debian Package field"

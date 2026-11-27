@@ -12,7 +12,7 @@ MODULES=(
   t2bce_dma.ko
   t2bce_ave.ko
   applesmc.ko
-  apple_gmux.ko
+  apple-gmux.ko
   hid-appletb-kbd.ko
   hid-appletb-bl.ko
   appletbdrm.ko
