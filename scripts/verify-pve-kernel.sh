@@ -55,7 +55,12 @@ trap 'rm -rf -- "$tmp"' EXIT
 root="$tmp/root"
 dpkg-deb --extract "$deb" "$root"
 [[ -d "$root/boot" ]] || fail "image package has no /boot directory"
-[[ -d "$root/lib/modules" ]] || fail "image package has no /lib/modules directory"
+module_roots=()
+for candidate in "$root/lib/modules" "$root/usr/lib/modules"; do
+  [[ -d "$candidate" ]] && module_roots+=("$candidate")
+done
+(( ${#module_roots[@]} > 0 )) || \
+  fail "image package has neither /lib/modules nor /usr/lib/modules directory"
 
 mapfile -d '' -t configs < <(find "$root/boot" -maxdepth 1 -type f -name 'config-*' -print0)
 (( ${#configs[@]} > 0 )) || fail "image package has no boot/config-* file"
@@ -76,8 +81,15 @@ done
 
 for module in "${MODULES[@]}"; do
   module_base="${module%.ko}"
-  if ! find "$root/lib/modules" -type f \
-    \( -name "$module" -o -name "$module.*" \) -print -quit | grep -q .; then
+  found=0
+  for modules_root in "${module_roots[@]}"; do
+    if find "$modules_root" -type f \
+      \( -name "$module" -o -name "$module.*" \) -print -quit | grep -q .; then
+      found=1
+      break
+    fi
+  done
+  if (( found == 0 )); then
     fail "required kernel module is missing: $module_base.ko"
   fi
 done
