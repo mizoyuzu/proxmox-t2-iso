@@ -32,6 +32,34 @@ modules.builtin
 modules.builtin.modinfo
 EOF
 
+normalize_module_path() {
+  local raw_path=$1 module_relative
+  case "$raw_path" in
+    "/lib/modules/$KVER/"*)
+      module_relative=${raw_path#"/lib/modules/$KVER/"}
+      ;;
+    "/usr/lib/modules/$KVER/"*)
+      module_relative=${raw_path#"/usr/lib/modules/$KVER/"}
+      ;;
+    "$KEX/lib/modules/$KVER/"*)
+      module_relative=${raw_path#"$KEX/lib/modules/$KVER/"}
+      ;;
+    "$KEX/usr/lib/modules/$KVER/"*)
+      module_relative=${raw_path#"$KEX/usr/lib/modules/$KVER/"}
+      ;;
+    *)
+      echo "ERROR: modprobe returned an unexpected module path: $raw_path" >&2
+      return 1
+      ;;
+  esac
+  case "$module_relative" in
+    ''|/*|..|../*|*/../*|*/..) ;;
+    *) printf '/lib/modules/%s/%s\n' "$KVER" "$module_relative"; return 0 ;;
+  esac
+  echo "ERROR: modprobe returned an unexpected module path: $raw_path" >&2
+  return 1
+}
+
 module_paths=$(mktemp)
 trap 'rm -f "$module_paths"' EXIT
 while IFS= read -r module || [[ -n $module ]]; do
@@ -43,7 +71,9 @@ while IFS= read -r module || [[ -n $module ]]; do
     exit 1
   }
   while IFS= read -r path; do
-    [[ -n $path ]] && printf '%s\n' "$path" >> "$module_paths"
+    [[ -n $path ]] || continue
+    normalized_path=$(normalize_module_path "$path") || exit 1
+    printf '%s\n' "$normalized_path" >> "$module_paths"
   done < <(awk '$1 == "insmod" { print $2 }' <<< "$output")
 done < "$MODULE_LIST"
 
@@ -58,7 +88,11 @@ while IFS= read -r module_path; do
     "/lib/modules/$KVER/"*) ;;
     *) echo "ERROR: modprobe returned an unexpected module path: $module_path" >&2; exit 1 ;;
   esac
+  module_relative=${module_path#"/lib/modules/$KVER/"}
   source_path="$KEX$module_path"
+  if [[ ! -f $source_path ]]; then
+    source_path="$KEX/usr/lib/modules/$KVER/$module_relative"
+  fi
   target_path="$INITRD_DIR$module_path"
   [[ -f $source_path ]] || { echo "ERROR: resolved module is absent: $source_path" >&2; exit 1; }
   mkdir -p -- "$(dirname -- "$target_path")"
