@@ -54,5 +54,3 @@ e1000e
 
 # Crypto used by storage/filesystems
 crc32c
-libcrc32c
-crc32c_intel
